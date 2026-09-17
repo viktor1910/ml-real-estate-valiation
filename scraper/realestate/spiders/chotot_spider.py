@@ -154,17 +154,28 @@ class ChotOtSpider(scrapy.Spider):
         dir_code = ad.get("direction")
         item["direction"] = DIRECTION_MAP.get(dir_code, str(dir_code) if dir_code else None)
 
-        # Nội thất — log raw để verify map lần đầu
-        interior_raw = ad.get("interior")
-        self.logger.debug(
-            f"[ad={ad_id}] interior={interior_raw!r} legal={ad.get('legal')!r} "
-            f"apartment_type={ad.get('apartment_type')!r} ad_type={ad.get('type')!r}"
+        # interior/legal không có ở listing endpoint — lấy từ seo_structure nếu có
+        seo_items = (
+            ad.get("feature_params", {})
+            .get("seo_structure", {})
+            .get("items", [])
         )
-        item["interior"] = INTERIOR_MAP.get(interior_raw, str(interior_raw) if interior_raw is not None else None)
+        seo = {s["id"]: s["value"] for s in seo_items if "id" in s}
 
-        # Pháp lý
-        legal_raw = ad.get("legal")
-        item["legal"] = LEGAL_MAP.get(legal_raw, str(legal_raw) if legal_raw is not None else None)
+        interior_raw = ad.get("interior")  # thường None ở listing API
+        item["interior"] = seo.get("furnishing_sell") or (
+            INTERIOR_MAP.get(interior_raw, str(interior_raw)) if interior_raw is not None else None
+        )
+
+        legal_raw = ad.get("legal")  # thường None ở listing API
+        item["legal"] = seo.get("legal_documents") or (
+            LEGAL_MAP.get(legal_raw, str(legal_raw)) if legal_raw is not None else None
+        )
+
+        self.logger.debug(
+            f"[ad={ad_id}] interior={item['interior']!r} legal={item['legal']!r} "
+            f"apt_type={ad.get('apartment_type')!r} ad_type={ad.get('type')!r}"
+        )
 
         # Loại căn hộ
         apt_raw = ad.get("apartment_type")
@@ -207,10 +218,8 @@ class ChotOtSpider(scrapy.Spider):
         return item
 
     def _build_url(self, cg, page):
-        return (
-            f"{self.API_BASE}?cg={cg}&page={page}&limit={self.LIMIT}"
-            f"&region_v2=13"  # TP.HCM region code
-        )
+        # Không lọc region ở đây — ETL M5 filter city="Tp Hồ Chí Minh"
+        return f"{self.API_BASE}?cg={cg}&page={page}&limit={self.LIMIT}"
 
     def handle_error(self, failure):
         self.logger.error(f"Request failed: {failure.request.url}")
