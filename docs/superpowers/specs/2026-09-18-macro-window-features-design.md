@@ -97,10 +97,16 @@ RETRAIN feature_pipeline.py:
 - **Leakage**: listing đăng 15/05 → `cpi_1m_lag` == giá trị **tháng 04**, KHÔNG phải tháng 05.
 - **Trailing window**: `vnindex_90d_ma` tại ngày D bỏ qua D+1 (không rò dữ liệu tương lai).
 
-## 10. Rủi ro / giả định cần verify khi implement
+## 10. Nguồn dữ liệu — đã xác minh (2026-09-18)
 
-- **Coverage vnstock** cho gold / CPI / lãi suất **chưa xác minh** (Rule 1). Spike-check API vnstock khi implement; nếu thiếu series nào → degrade sang manual CSV cho series đó, **không đổi thiết kế**.
-- CPI/lãi suất là dữ liệu **tháng** — "daily crawl" thực chất = daily market series + monthly macro carry-forward.
+Spike-check đã chạy, không còn là giả định:
+
+- **vnstock CÓ**: `explorer.misc.exchange_rate` (USD/VND), `explorer.misc.gold_price`, `Quote/Market` (vnindex). → 3 market series **fully automated** qua vnstock.
+- **vnstock KHÔNG có** module CPI / lãi suất.
+- **IMF làm nguồn CPI monthly = loại** (đã probe): datamapper API chỉ trả **annual** (WEO); SDMX cũ `dataservices.imf.org/.../IFS/M.VN.PCPI_IX` trả **rỗng** (deprecated). Không có API free monthly VN CPI ổn định.
+- **CPI + lãi suất = manual CSV** từ GSO/SBV. Publish theo tháng (~12 giá trị/năm) → copy 1 dòng/tháng, rẻ hơn nhiều so với wire API vỡ (Rule 2). Không phụ thuộc API ngoài.
+
+CPI/lãi suất là dữ liệu **tháng** — "daily crawl" thực chất = daily market series (vnstock) + monthly macro carry-forward (manual).
 
 ## 11. Ngoài phạm vi (defer)
 
