@@ -23,6 +23,26 @@ MONTHLY_COLS = [
 ]
 MACRO_COLS = MARKET_COLS + MONTHLY_COLS
 
+from pyspark.sql import Window, functions as F
+
+
+def build_market_windows(macro_df):
+    """Trailing 90d MA + 90d pct-change cho vnindex/usdvnd/gold.
+
+    Giả định macro_df liên tục theo ngày (mọi calendar day 1 dòng) nên
+    lag 90 dòng == lag 90 ngày. `d` là DATE. MA dùng rangeBetween theo
+    số ngày (int days) để đúng cả khi có khoảng trống.
+    """
+    dnum = F.unix_date(F.col("d"))                     # ngày kể từ epoch (int)
+    w_ma = Window.orderBy(dnum).rangeBetween(-89, 0)   # 90 ngày gồm hôm nay
+    w_lag = Window.orderBy(dnum)
+    out = macro_df
+    for s in ("vnindex", "usdvnd", "gold"):
+        out = out.withColumn(f"{s}_90d_ma", F.avg(s).over(w_ma))
+        prev = F.lag(s, 90).over(w_lag)
+        out = out.withColumn(f"{s}_90d_pct", (F.col(s) - prev) / prev)
+    return out
+
 
 def gate_decision(span_days: int, distinct_months: int) -> tuple[bool, str]:
     """Quyết định bật/tắt cột macro theo độ sâu thời gian của pool."""
