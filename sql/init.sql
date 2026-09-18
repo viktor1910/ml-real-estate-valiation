@@ -26,6 +26,16 @@ CREATE TABLE IF NOT EXISTS macro_monthly (
     rate   DOUBLE PRECISION NOT NULL  -- lãi suất %/năm
 );
 
+-- Người dùng được phép đăng nhập dashboard. Tunnel công khai -> phải chặn
+-- người lạ nhập CPI gây nhiễu. password_hash = bcrypt (KHÔNG lưu plaintext).
+-- Tạo user bằng: python dashboard/manage_users.py <username>
+-- (script tự hash bcrypt rồi UPSERT — không seed sẵn ở đây để tránh hash cứng).
+CREATE TABLE IF NOT EXISTS users (
+    username       TEXT PRIMARY KEY,
+    password_hash  TEXT NOT NULL,             -- bcrypt hash
+    created_at     TIMESTAMP DEFAULT now()
+);
+
 -- Seed = nội dung cpi_rate_monthly.csv cũ (giữ nguyên hành vi lần chạy đầu).
 INSERT INTO macro_monthly (month, cpi, rate) VALUES
     ('2025-01', 110.20, 4.50),

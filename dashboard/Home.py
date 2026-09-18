@@ -4,9 +4,11 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 import pandas as pd
 import streamlit as st
+import auth
 import db
 
 st.set_page_config(page_title="Báo cáo Bất động sản", layout="wide")
+auth.require_login()
 st.title("📊 Báo cáo dự đoán")
 
 try:

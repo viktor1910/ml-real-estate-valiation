@@ -3,9 +3,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import streamlit as st
+import auth
 import db
 
 st.set_page_config(page_title="Nhập CPI", layout="centered")
+auth.require_login()
 st.title("📝 Nhập CPI / Lãi suất theo tháng")
 
 try:

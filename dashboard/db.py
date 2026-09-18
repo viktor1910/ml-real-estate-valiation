@@ -17,6 +17,17 @@ UPSERT_MACRO_SQL = (
     "ON CONFLICT (month) DO UPDATE SET cpi = EXCLUDED.cpi, rate = EXCLUDED.rate"
 )
 
+UPSERT_USER_SQL = (
+    "INSERT INTO users (username, password_hash) VALUES (%s, %s) "
+    "ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash"
+)
+
+CREATE_USERS_SQL = (
+    "CREATE TABLE IF NOT EXISTS users ("
+    "username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, "
+    "created_at TIMESTAMP DEFAULT now())"
+)
+
 SEED_START = date(2025, 1, 1)
 
 
@@ -65,4 +76,23 @@ def upsert_macro(month, cpi, rate):
     with get_connection() as c:
         with c.cursor() as cur:
             cur.execute(UPSERT_MACRO_SQL, (month, float(cpi), float(rate)))
+        c.commit()
+
+
+def get_password_hash(username):
+    """bcrypt hash for `username`, or None if the user doesn't exist."""
+    with get_connection() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT password_hash FROM users WHERE username = %s", (username,))
+            row = cur.fetchone()
+    return row[0] if row else None
+
+
+def upsert_user(username, password_hash):
+    """Create or replace a login. `password_hash` must already be bcrypt-hashed."""
+    with get_connection() as c:
+        with c.cursor() as cur:
+            cur.execute(CREATE_USERS_SQL)            # idempotent: live DB may predate init.sql
+            cur.execute(UPSERT_USER_SQL, (username, password_hash))
         c.commit()
