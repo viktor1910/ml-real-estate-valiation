@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.14, PySpark (JDK 17), vnstock 4.x, pytest (mới thêm cho unit test logic thuần), pandas.
 
+> **Interpreter:** dùng project-local `.venv/bin/python` (KHÔNG phải `~/.venv`) — khớp `PY` mặc định của `retrain.sh`/`run_daily.sh`. Mọi lệnh `~/.venv/bin/python` trong plan đọc là `.venv/bin/python`.
+
 **Spec:** `docs/superpowers/specs/2026-09-18-macro-window-features-design.md`
 
 ## Global Constraints
