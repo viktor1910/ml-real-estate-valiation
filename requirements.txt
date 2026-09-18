@@ -7,3 +7,5 @@ vnstock==4.0.8
 yfinance==1.7.0
 kafka-python==2.0.2
 scrapy==2.19.0
+streamlit==1.64.0
+psycopg2-binary==2.9.13
