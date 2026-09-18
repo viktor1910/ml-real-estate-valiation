@@ -93,7 +93,12 @@ NUM_BASE = [
     "log_area", "bedrooms", "floors", "rank_quan", "dist_center",
     "year", "month", "quarter", "dayofweek",
 ]
-MACRO = ["gold_usd", "usdvnd", "vnindex"]
+from macro_features import MACRO_COLS
+# chỉ dùng cột macro thực sự có trong dataset (gate có thể đã drop hết)
+MACRO = [c for c in MACRO_COLS if c in feat.columns]
+print(f"train: {len(MACRO)} cột macro có trong features")
+if not MACRO:
+    print("train: gate OFF -> ablation macro/no_macro trùng nhau (delta_rmse≈0), đúng thiết kế")
 
 def feature_stages(use_macro: bool):
     """Stage đặc trưng M6 (English); toggle 3 cột macro. Categorical: property_type + interior."""

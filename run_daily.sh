@@ -13,6 +13,9 @@ DT="$(date +%F)"
 
 echo "===== DAILY $DT ====="
 
+# 0) fetch macro market series (vnstock) -> macro_raw lake (trước clean_parse)
+$PY ml/fetch_macro.py || echo "⚠ fetch_macro lỗi -> dùng carry-forward"
+
 # 1) crawl -> Kafka  (bật khi Kafka chạy; demo dùng replay_producer thay spider)
 # (cd scraper && scrapy crawl chotot)
 # $PY streaming/replay_producer.py --csv data/raw_csv/chotot_bds_data.csv
