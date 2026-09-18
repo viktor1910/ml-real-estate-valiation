@@ -109,3 +109,38 @@ def gate_decision(span_days: int, distinct_months: int) -> tuple[bool, str]:
         reason = (f"GATE=OFF (span={span_days}d, months={distinct_months}; "
                   f"cần >={GATE_MIN_SPAN_DAYS}d AND >={GATE_MIN_MONTHS})")
     return on, reason
+
+
+def attach_macro(spark, listings, market_path, monthly_csv):
+    """Gate + as-of join macro vào listings. Trả (df, gate_on)."""
+    listings = (listings
+                .withColumn("posted_date", F.to_date("posted_at"))
+                .withColumn("posted_month", F.date_format("posted_at", "yyyy-MM")))
+
+    stats = listings.select(
+        F.datediff(F.max("posted_date"), F.min("posted_date")).alias("span"),
+        F.countDistinct("posted_month").alias("months"),
+    ).first()
+    span = int(stats["span"] or 0)
+    months = int(stats["months"] or 0)
+    on, reason = gate_decision(span, months)
+    print(f"[macro] {reason}")
+
+    if not on:
+        return listings.drop("posted_date", "posted_month"), False
+
+    daily, monthly = load_macro(spark, market_path, monthly_csv)
+
+    # as-of daily theo ngày; dòng sau ngày macro cuối -> carry-forward
+    dsel = daily.select(F.col("d").alias("d_join"), *MARKET_COLS)
+    df = listings.join(dsel, listings["posted_date"] == dsel["d_join"], "left").drop("d_join")
+    last_day = daily.orderBy(F.col("d").desc()).first()
+    df = df.fillna({c: last_day[c] for c in MARKET_COLS})
+
+    # monthly theo tháng; tháng ngoài bảng -> carry-forward tháng cuối
+    msel = monthly.select(F.col("month").alias("m_join"), *MONTHLY_COLS)
+    df = df.join(msel, df["posted_month"] == msel["m_join"], "left").drop("m_join")
+    last_month = monthly.orderBy(F.col("month").desc()).first()
+    df = df.fillna({c: last_month[c] for c in MONTHLY_COLS})
+
+    return df.drop("posted_date", "posted_month"), True

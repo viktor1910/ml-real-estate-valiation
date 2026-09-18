@@ -118,3 +118,52 @@ def test_load_macro_forward_fills_gaps(spark, tmp_path):
     assert days == ["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-04", "2025-01-05"]
     assert "gold" in daily.columns and "vnindex_90d_ma" in daily.columns
     assert "cpi_1m_lag" in monthly.columns
+
+
+def _write_market_and_csv(spark, tmp_path):
+    import pandas as pd, datetime as dt
+    d0 = dt.date(2025, 1, 1)
+    rows = [((d0 + dt.timedelta(days=i)).isoformat(), 1.0, 10.0, 100.0 + i)
+            for i in range(400)]
+    spark.createDataFrame(rows, ["date", "gold_usd", "usdvnd", "vnindex"]) \
+        .write.parquet(str(tmp_path / "mk"))
+    pd.DataFrame({"month": [f"2025-{m:02d}" for m in range(1, 13)] + ["2026-01", "2026-02"],
+                  "cpi": [100.0 + m for m in range(14)],
+                  "rate": [4.0] * 14}).to_csv(str(tmp_path / "m.csv"), index=False)
+    return str(tmp_path / "mk"), str(tmp_path / "m.csv")
+
+
+def test_attach_macro_gate_off_drops_all(spark, tmp_path):
+    from macro_features import attach_macro, MACRO_COLS
+    mk, csv = _write_market_and_csv(spark, tmp_path)
+    listings = spark.createDataFrame(
+        [("a", "2025-06-01"), ("b", "2025-06-02")], ["ad_id", "posted_at"])
+    df, on = attach_macro(spark, listings, mk, csv)
+    assert on is False
+    for c in MACRO_COLS:
+        assert c not in df.columns
+
+
+def test_attach_macro_gate_on_adds_14(spark, tmp_path):
+    from macro_features import attach_macro, MACRO_COLS
+    mk, csv = _write_market_and_csv(spark, tmp_path)
+    listings = spark.createDataFrame(
+        [(str(i), f"2025-{m:02d}-15") for i, m in enumerate(range(1, 9))],
+        ["ad_id", "posted_at"])
+    df, on = attach_macro(spark, listings, mk, csv)
+    assert on is True
+    for c in MACRO_COLS:
+        assert c in df.columns
+    assert df.count() == 8
+
+
+def test_attach_macro_leakage_may_15_sees_april_cpi(spark, tmp_path):
+    from macro_features import attach_macro
+    mk, csv = _write_market_and_csv(spark, tmp_path)
+    listings = spark.createDataFrame(
+        [(str(i), f"2025-{m:02d}-15") for i, m in enumerate(range(1, 9))],
+        ["ad_id", "posted_at"])
+    df, on = attach_macro(spark, listings, mk, csv)
+    r = {x["posted_at"]: x for x in df.collect()}
+    # tin đăng 2025-05-15: cpi_1m_lag = CPI tháng 04. csv cpi=100+idx, idx(thg4)=3 -> 103.
+    assert abs(r["2025-05-15"]["cpi_1m_lag"] - 103.0) < 1e-9
