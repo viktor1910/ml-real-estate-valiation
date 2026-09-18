@@ -19,9 +19,11 @@ import argparse
 import json
 import os
 
+from config import META_DIR
+
 
 def _rmse(version):
-    p = f"models/v{version}/metrics.json"
+    p = f"{META_DIR}/v{version}/metrics.json"
     with open(p, encoding="utf-8") as f:
         return json.load(f)["baseline_rmse"]
 
@@ -29,7 +31,7 @@ def _rmse(version):
 def main():
     ap = argparse.ArgumentParser(description="Promote model mới nếu tốt hơn prod")
     ap.add_argument("--new-version", required=True, help="Version model vừa train, vd 2026-09-18")
-    ap.add_argument("--pointer", default="models/current.json")
+    ap.add_argument("--pointer", default=f"{META_DIR}/current.json")
     args = ap.parse_args()
 
     new_rmse = _rmse(args.new_version)

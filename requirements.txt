@@ -1,0 +1,9 @@
+# Real Estate Valuation — production deps (pin để build image tái lập).
+# Khớp .venv dev hiện tại. Container dùng Python 3.11 (không 3.14) cho ổn định.
+pyspark==4.2.0
+pandas==2.3.3
+numpy==2.2.6
+vnstock==4.0.8
+yfinance==1.7.0
+kafka-python==2.0.2
+scrapy==2.19.0

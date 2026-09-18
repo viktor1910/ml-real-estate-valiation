@@ -27,10 +27,7 @@ Run:
 import os, json, datetime
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, LAKE, MODEL_STORE, META_DIR
 
 from pyspark.sql import SparkSession
 from pyspark.ml import Pipeline
@@ -45,21 +42,16 @@ from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 from pyspark.ml.evaluation import RegressionEvaluator
 import pandas as pd
 
-FEAT_IN   = "data/lake/listings_features/sale"   # input (M6)
+FEAT_IN   = f"{LAKE}/listings_features/sale"   # input (M6)
 LABEL     = "price_per_m2"
 VERSION   = datetime.date.today().isoformat()    # vd 2026-09-17
-MODEL_DIR = f"models/v{VERSION}"
+MODEL_DIR = f"{MODEL_STORE}/v{VERSION}"          # binary model (Spark, có thể s3a)
+META_VDIR = f"{META_DIR}/v{VERSION}"             # metrics.json (driver-local)
 SEED      = 42
 
 # ## 2. Spark + đọc feature dataset + chia train/test (random 80/20)
 
-spark = (
-    SparkSession.builder.appName("M7-train")
-    .master("local[*]")
-    .config("spark.sql.shuffle.partitions", "8")
-    .getOrCreate()
-)
-spark.sparkContext.setLogLevel("WARN")
+spark = build_spark("M7-train")
 
 feat = spark.read.parquet(FEAT_IN)
 train, test = feat.randomSplit([0.8, 0.2], seed=SEED)
@@ -195,7 +187,7 @@ best_row = min(macro_rows, key=lambda r: r["rmse"])
 best_key = (best_row["model"], "macro")
 best_model = best_models[best_key]
 
-os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(META_VDIR, exist_ok=True)   # metrics.json ghi bằng open() -> cần dir local
 best_model.write().overwrite().save(f"{MODEL_DIR}/model")
 
 metrics = {
@@ -209,12 +201,12 @@ metrics = {
              "rmse": best_row["rmse"], "mae": best_row["mae"], "r2": best_row["r2"]},
     "baseline_rmse": best_row["rmse"],   # M8 drift check so với số này
 }
-with open(f"{MODEL_DIR}/metrics.json", "w") as f:
+with open(f"{META_VDIR}/metrics.json", "w") as f:
     json.dump(metrics, f, ensure_ascii=False, indent=2)
 
 print(f"model tốt nhất (macro): {best_row['model']} | test RMSE={best_row['rmse']:.3f} R2={best_row['r2']:.3f}")
 print(f"lưu -> {MODEL_DIR}/model")
-print(f"metrics -> {MODEL_DIR}/metrics.json | baseline_rmse={metrics['baseline_rmse']:.3f}")
+print(f"metrics -> {META_VDIR}/metrics.json | baseline_rmse={metrics['baseline_rmse']:.3f}")
 
 # ## 8. Verify — nạp lại model + predict thử
 

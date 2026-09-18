@@ -1,0 +1,15 @@
+.venv/
+.git/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+data/lake/
+models/v*/
+models/current.json
+models/retrain_needed.json
+models/impute_stats.json
+models/feature_pipeline/
+.env
+*.log
+docs/
+*.ipynb

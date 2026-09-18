@@ -11,7 +11,8 @@ Chế độ:
   --backfill START END  fetch dải quá khứ qua API -> macro_raw/dt=backfill-<END>
                         (vnindex 1 call range; usdvnd/gold loop từng ngày)
 
-CPI/lãi suất KHÔNG ở đây — chúng monthly, nhập tay qua cpi_rate_monthly.csv.
+CPI/lãi suất KHÔNG ở đây — chúng monthly, lưu ở bảng Postgres `macro_monthly`
+(nhập/UPSERT qua SQL hoặc UI; xem sql/init.sql). macro_features đọc bảng đó.
 vnstock fail (chế độ daily) -> exit 0 + WARN (daily loop không vỡ; carry-forward).
 """
 import os
@@ -22,10 +23,9 @@ import datetime
 
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
-os.environ.setdefault(
-    "JAVA_HOME", "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home")
+from config import build_spark, LAKE as _LAKE_ROOT
 
-LAKE = "data/lake/macro_raw"
+LAKE = f"{_LAKE_ROOT}/macro_raw"
 TODAY = datetime.date.today().isoformat()
 
 
@@ -58,10 +58,7 @@ def _gold_on(day: str) -> float | None:
 
 
 def _write(rows: list[dict], part: str) -> None:
-    from pyspark.sql import SparkSession
-    spark = (SparkSession.builder.appName("fetch-macro")
-             .master("local[1]").getOrCreate())
-    spark.sparkContext.setLogLevel("ERROR")
+    spark = build_spark("fetch-macro")
     spark.createDataFrame(rows).write.mode("overwrite").parquet(part)
     spark.stop()
 

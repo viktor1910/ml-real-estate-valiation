@@ -33,28 +33,25 @@ Run:
 import os, json, datetime
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, LAKE, MODEL_STORE, META_DIR, PG_DRIVER_PKG
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.ml import PipelineModel
 from pyspark.ml.evaluation import RegressionEvaluator
 
 # --- Cấu hình (đổi NEW_BATCH khi có crawl mới) ---
-NEW_BATCH  = os.getenv("SCORE_NEW_BATCH", "data/lake/listings_clean/sale")  # override qua env khi cron truyền lô crawl hôm nay
-MARKET_LAKE = "data/lake/macro_raw"
-MONTHLY_CSV = "data/raw_csv/macro/cpi_rate_monthly.csv"
-# version model = con trỏ prod đã promote (models/current.json); fallback env/cứng
-_CUR = "models/current.json"
+NEW_BATCH  = os.getenv("SCORE_NEW_BATCH", f"{LAKE}/listings_clean/sale")  # override qua env khi cron truyền lô crawl hôm nay
+MARKET_LAKE = f"{LAKE}/macro_raw"
+MONTHLY_TABLE = os.getenv("PG_MACRO_TABLE", "macro_monthly")  # CPI/lãi suất -> Postgres
+# version model = con trỏ prod đã promote (current.json); fallback env/cứng
+_CUR = f"{META_DIR}/current.json"
 if os.path.exists(_CUR):
     VERSION = json.load(open(_CUR, encoding="utf-8"))["version"]
 else:
     VERSION = os.getenv("MODEL_VERSION", "2026-09-17")
-MODEL_PATH = f"models/v{VERSION}/model"            # FULL PipelineModel (M7)
-METRICS    = f"models/v{VERSION}/metrics.json"
-PRED_OUT   = "data/lake/predictions/sale"          # output: bảng dự đoán (M9 đọc)
+MODEL_PATH = f"{MODEL_STORE}/v{VERSION}/model"     # FULL PipelineModel (M7) — Spark/s3a
+METRICS    = f"{META_DIR}/v{VERSION}/metrics.json" # driver-local
+PRED_OUT   = f"{LAKE}/predictions/sale"            # output: bảng dự đoán (M9 đọc)
 LABEL      = "price_per_m2"                          # giá thực (triệu/m²) — có trong lô để drift check
 
 UNDERVALUED_TH = 0.20     # cờ định giá thấp khi ratio >= 20%
@@ -66,13 +63,7 @@ with open(METRICS) as f:
 DRIFT_TH = DRIFT_MULT * BASELINE_RMSE
 print(f"baseline_rmse={BASELINE_RMSE:.3f} | drift threshold={DRIFT_TH:.3f} (>{DRIFT_MULT}x)")
 
-spark = (
-    SparkSession.builder.appName("M8-score")
-    .master("local[*]")
-    .config("spark.sql.shuffle.partitions", "8")
-    .getOrCreate()
-)
-spark.sparkContext.setLogLevel("WARN")
+spark = build_spark("M8-score", packages=PG_DRIVER_PKG)
 
 # 1) Đọc lô tin mới + GHÉP VĨ MÔ theo posted_at (y hệt M6 qua macro_features)
 from macro_features import attach_macro
@@ -80,7 +71,7 @@ from macro_features import attach_macro
 listings = spark.read.parquet(NEW_BATCH)
 print("lô mới:", listings.count(), "dòng,", len(listings.columns), "cột")
 
-feat, gate_on = attach_macro(spark, listings, MARKET_LAKE, MONTHLY_CSV)
+feat, gate_on = attach_macro(spark, listings, MARKET_LAKE, MONTHLY_TABLE)
 print(f"macro gate_on={gate_on}")
 
 # 2) Nạp FULL PipelineModel + transform → prediction (giá dự đoán triệu/m²)
@@ -128,7 +119,7 @@ else:
 
 # 4b) GHI CỜ DRIFT — cron/orchestrator đọc file này để quyết định có retrain không.
 #     Tách tín hiệu khỏi hành động: score chỉ báo, không tự train.
-FLAG_OUT = os.getenv("RETRAIN_FLAG", "models/retrain_needed.json")
+FLAG_OUT = os.getenv("RETRAIN_FLAG", f"{META_DIR}/retrain_needed.json")
 with open(FLAG_OUT, "w", encoding="utf-8") as f:
     json.dump({
         "drift": bool(drift),

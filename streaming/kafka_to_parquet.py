@@ -16,7 +16,9 @@ import sys
 # Spark local → chạy từ project root
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(PROJECT_ROOT)
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "ml"))   # để import config chung
 
+from config import build_spark, LAKE
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, to_date
 from pyspark.sql.types import (
@@ -25,8 +27,8 @@ from pyspark.sql.types import (
 
 KAFKA_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC   = "real_estate_raw"
-LAKE_PATH     = "data/lake/listings_raw"
-CHECKPOINT    = "data/lake/_checkpoints/listings_raw"
+LAKE_PATH     = f"{LAKE}/listings_raw"
+CHECKPOINT    = f"{LAKE}/_checkpoints/listings_raw"
 
 # Tất cả cột giữ raw string — cast/parse ở M5 ETL
 RAW_SCHEMA = StructType([
@@ -56,17 +58,8 @@ RAW_SCHEMA = StructType([
 
 
 def main():
-    spark = (
-        SparkSession.builder
-        .appName("KafkaToParquet")
-        .config(
-            "spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0",
-        )
-        .config("spark.sql.shuffle.partitions", "4")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
+    # Jar spark-sql-kafka đến từ SPARK_JARS_PACKAGES (đúng Scala 2.13 / Spark 4.2).
+    spark = build_spark("KafkaToParquet")
 
     stream = (
         spark.readStream

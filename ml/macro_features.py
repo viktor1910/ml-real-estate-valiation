@@ -24,6 +24,7 @@ MONTHLY_COLS = [
 MACRO_COLS = MARKET_COLS + MONTHLY_COLS
 
 from pyspark.sql import Window, functions as F
+from config import pg_read
 
 
 def build_market_windows(macro_df):
@@ -65,11 +66,12 @@ def build_monthly_windows(monthly_df):
     return out
 
 
-def load_macro(spark, market_path, monthly_csv):
-    """Nạp market lake + monthly csv -> (daily_windows, monthly_windows).
+def load_macro(spark, market_path, monthly_table):
+    """Nạp market lake + bảng vĩ mô Postgres -> (daily_windows, monthly_windows).
 
     Forward-fill market ra mọi calendar day trong [min,max] để lag theo
     dòng == lag theo ngày. Monthly build lag; daily build MA/pct.
+    `monthly_table` = bảng Postgres (cột month/cpi/rate) — đọc qua JDBC.
     """
     raw = (spark.read.parquet(market_path)
            .withColumn("d", F.to_date("date"))
@@ -93,7 +95,7 @@ def load_macro(spark, market_path, monthly_csv):
     daily = build_market_windows(j).withColumn(
         "month", F.date_format("d", "yyyy-MM"))
 
-    monthly_raw = (spark.read.option("header", True).csv(monthly_csv)
+    monthly_raw = (pg_read(spark, monthly_table)
                    .withColumn("cpi", F.col("cpi").cast("double"))
                    .withColumn("rate", F.col("rate").cast("double"))
                    .select("month", "cpi", "rate"))
@@ -112,7 +114,7 @@ def gate_decision(span_days: int, distinct_months: int) -> tuple[bool, str]:
     return on, reason
 
 
-def attach_macro(spark, listings, market_path, monthly_csv):
+def attach_macro(spark, listings, market_path, monthly_table):
     """Gate + as-of join macro vào listings. Trả (df, gate_on)."""
     listings = (listings
                 .withColumn("posted_date", F.to_date("posted_at"))
@@ -130,7 +132,7 @@ def attach_macro(spark, listings, market_path, monthly_csv):
     if not on:
         return listings.drop("posted_date", "posted_month"), False
 
-    daily, monthly = load_macro(spark, market_path, monthly_csv)
+    daily, monthly = load_macro(spark, market_path, monthly_table)
     last_day = daily.orderBy(F.col("d").desc()).first()
     last_month = monthly.orderBy(F.col("month").desc()).first()
 

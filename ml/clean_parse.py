@@ -25,15 +25,12 @@ import os
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
 
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, LAKE
 
 from pyspark.sql import SparkSession, functions as F
 
-DEFAULT_SRC = "data/lake/listings_raw"
-POOL = "data/lake/listings_pool"
+DEFAULT_SRC = f"{LAKE}/listings_raw"
+POOL = f"{LAKE}/listings_pool"
 
 # cột crawl không có / bỏ: bathrooms+legal (null 100%), text thừa
 DROP_COLS = ["bathrooms", "legal", "price_string", "apartment_type",
@@ -58,11 +55,7 @@ def main():
     ap.add_argument("--dt", default=None, help="Ngày partition (mặc định hôm nay)")
     args = ap.parse_args()
 
-    spark = (
-        SparkSession.builder.appName("clean_parse-pool")
-        .master("local[*]").config("spark.sql.shuffle.partitions", "8").getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
+    spark = build_spark("clean_parse-pool")
 
     raw = spark.read.parquet(args.src)
     print("thô:", raw.count(), "| cột:", len(raw.columns))

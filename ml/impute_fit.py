@@ -23,15 +23,12 @@ import os
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
 
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, LAKE, META_DIR
 
 from pyspark.sql import SparkSession, functions as F, Window
 
-DEFAULT_SRC = "data/lake/listings_pool"
-DEFAULT_OUT = "models/impute_stats.json"
+DEFAULT_SRC = f"{LAKE}/listings_pool"
+DEFAULT_OUT = f"{META_DIR}/impute_stats.json"
 IQR_COLS = ("price_per_m2", "area")
 
 
@@ -48,11 +45,7 @@ def main():
     ap.add_argument("--out", default=DEFAULT_OUT)
     args = ap.parse_args()
 
-    spark = (
-        SparkSession.builder.appName("impute_fit")
-        .master("local[*]").config("spark.sql.shuffle.partitions", "8").getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
+    spark = build_spark("impute_fit")
 
     df = dedup_pool(spark.read.parquet(args.src))
     n_in = df.count()

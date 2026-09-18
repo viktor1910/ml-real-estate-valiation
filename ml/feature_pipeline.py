@@ -12,10 +12,7 @@ Categorical: property_type + interior (StringIndexer -> OneHot). Numeric bỏ ba
 import os
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, LAKE, MODEL_STORE, PG_DRIVER_PKG
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.ml import Pipeline
@@ -23,18 +20,14 @@ from pyspark.ml.feature import (
     SQLTransformer, StringIndexer, OneHotEncoder, VectorAssembler, StandardScaler,
 )
 
-CLEAN     = "data/lake/listings_clean/sale"
-MARKET_LAKE = "data/lake/macro_raw"
-MONTHLY_CSV = "data/raw_csv/macro/cpi_rate_monthly.csv"
-FEAT_OUT  = "data/lake/listings_features/sale"
-PIPE_PATH = "models/feature_pipeline"
+CLEAN     = f"{LAKE}/listings_clean/sale"
+MARKET_LAKE = f"{LAKE}/macro_raw"
+MONTHLY_TABLE = os.getenv("PG_MACRO_TABLE", "macro_monthly")  # CPI/lãi suất -> Postgres
+FEAT_OUT  = f"{LAKE}/listings_features/sale"
+PIPE_PATH = f"{MODEL_STORE}/feature_pipeline"
 HCM_LAT, HCM_LON = 10.7769, 106.7009
 
-spark = (
-    SparkSession.builder.appName("M6-feature-pipeline")
-    .master("local[*]").config("spark.sql.shuffle.partitions", "8").getOrCreate()
-)
-spark.sparkContext.setLogLevel("WARN")
+spark = build_spark("M6-feature-pipeline", packages=PG_DRIVER_PKG)
 
 from macro_features import attach_macro, MACRO_COLS
 
@@ -42,7 +35,7 @@ listings = spark.read.parquet(CLEAN)
 print("listings_clean:", listings.count(), "dòng,", len(listings.columns), "cột")
 
 # Gate + as-of join macro (trailing lag/rolling). Gate OFF -> 0 cột macro.
-feat, gate_on = attach_macro(spark, listings, MARKET_LAKE, MONTHLY_CSV)
+feat, gate_on = attach_macro(spark, listings, MARKET_LAKE, MONTHLY_TABLE)
 macro_present = [c for c in MACRO_COLS if c in feat.columns]
 print(f"macro gate_on={gate_on} | {len(macro_present)} cột macro: {macro_present}")
 

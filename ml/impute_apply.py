@@ -19,10 +19,7 @@ import os
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
 
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, META_DIR
 
 from pyspark.sql import SparkSession, functions as F, Window
 
@@ -37,18 +34,14 @@ def main():
     ap = argparse.ArgumentParser(description="Áp stats đóng băng -> data sạch")
     ap.add_argument("--src", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--stats", default="models/impute_stats.json")
+    ap.add_argument("--stats", default=f"{META_DIR}/impute_stats.json")
     ap.add_argument("--mode", choices=["train", "serve"], required=True)
     args = ap.parse_args()
 
     with open(args.stats, encoding="utf-8") as f:
         stats = json.load(f)
 
-    spark = (
-        SparkSession.builder.appName(f"impute_apply-{args.mode}")
-        .master("local[*]").config("spark.sql.shuffle.partitions", "8").getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
+    spark = build_spark(f"impute_apply-{args.mode}")
 
     df = spark.read.parquet(args.src)
     if args.mode == "train":
