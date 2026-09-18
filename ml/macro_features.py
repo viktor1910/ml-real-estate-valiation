@@ -44,6 +44,27 @@ def build_market_windows(macro_df):
     return out
 
 
+def build_monthly_windows(monthly_df):
+    """Lag 1/3/6 tháng + pct 1 quý cho cpi/rate. Leakage-safe: min lag = 1 tháng.
+
+    `month` = 'YYYY-MM'. Sắp theo tháng, dùng lag() số dòng = số tháng
+    (giả định monthly liên tục, không khuyết tháng — load_macro đảm bảo).
+    """
+    w = Window.orderBy("month")
+    out = monthly_df
+    for s in ("cpi", "rate"):
+        l1 = F.lag(s, 1).over(w)
+        l3 = F.lag(s, 3).over(w)
+        l4 = F.lag(s, 4).over(w)
+        l6 = F.lag(s, 6).over(w)
+        out = (out
+               .withColumn(f"{s}_1m_lag", l1)
+               .withColumn(f"{s}_3m_lag", l3)
+               .withColumn(f"{s}_6m_lag", l6)
+               .withColumn(f"{s}_90d_pct", l1 / l4 - 1))
+    return out
+
+
 def gate_decision(span_days: int, distinct_months: int) -> tuple[bool, str]:
     """Quyết định bật/tắt cột macro theo độ sâu thời gian của pool."""
     on = span_days >= GATE_MIN_SPAN_DAYS and distinct_months >= GATE_MIN_MONTHS

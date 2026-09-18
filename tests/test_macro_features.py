@@ -67,3 +67,32 @@ def test_market_has_all_market_cols(spark):
     out = build_market_windows(df)
     for c in MARKET_COLS:
         assert c in out.columns
+
+
+def test_monthly_lag_excludes_current_month(spark):
+    from macro_features import build_monthly_windows
+    rows = [(f"2025-{m:02d}", 100.0 + m, 4.0 + m * 0.1) for m in range(1, 13)]
+    df = spark.createDataFrame(rows, ["month", "cpi", "rate"])
+    out = {r["month"]: r for r in build_monthly_windows(df).collect()}
+    # 2025-08: cpi tháng 8 = 108. 1m_lag = tháng 7 = 107 (KHÔNG phải 108).
+    assert abs(out["2025-08"]["cpi_1m_lag"] - 107.0) < 1e-9
+    assert abs(out["2025-08"]["cpi_3m_lag"] - 105.0) < 1e-9
+    assert abs(out["2025-08"]["cpi_6m_lag"] - 102.0) < 1e-9
+
+
+def test_monthly_90d_pct_is_quarter_over_lagged(spark):
+    from macro_features import build_monthly_windows
+    rows = [(f"2025-{m:02d}", 100.0 + m, 4.0) for m in range(1, 13)]
+    df = spark.createDataFrame(rows, ["month", "cpi", "rate"])
+    out = {r["month"]: r for r in build_monthly_windows(df).collect()}
+    # 2025-08: 1m_lag=107 (thg7), 4m_lag=104 (thg4); pct = 107/104 - 1
+    assert abs(out["2025-08"]["cpi_90d_pct"] - (107.0 / 104.0 - 1)) < 1e-9
+
+
+def test_monthly_has_all_monthly_cols(spark):
+    from macro_features import build_monthly_windows, MONTHLY_COLS
+    rows = [(f"2025-{m:02d}", 100.0 + m, 4.0) for m in range(1, 13)]
+    df = spark.createDataFrame(rows, ["month", "cpi", "rate"])
+    out = build_monthly_windows(df)
+    for c in MONTHLY_COLS:
+        assert c in out.columns
