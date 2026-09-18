@@ -1,8 +1,19 @@
-# Ignore everything, keep only ml/
-/*
-!/ml/
-!/.gitignore
+# --- binary / generated artifacts ---
+data/lake/
+models/*/model/
+models/*/stages/
+models/feature_pipeline/
 
-# Inside ml/: drop caches and notebook checkpoints
-ml/**/__pycache__/
-ml/**/.ipynb_checkpoints/
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Scrapy ---
+.scrapy/
+
