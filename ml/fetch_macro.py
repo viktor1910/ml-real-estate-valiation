@@ -1,103 +1,133 @@
-"""Tải chuỗi vĩ mô nhịp ngày cho đồ án Real Estate Valuation (M6).
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""fetch_macro — lấy market series (vnstock) append macro_raw lake.
 
-3 chuỗi:
-  - gold_usd : giá vàng thế giới (yfinance GC=F, USD/oz)
-  - usdvnd   : tỷ giá USD/VND (yfinance VND=X)
-  - vnindex  : chỉ số VN-Index (vnstock, nguồn VCI)
+Series: vnindex (VCI close), usdvnd (VCB sell), gold_usd (SJC sell HCM —
+tên cột giữ theo schema cũ dù đơn vị VND/lượng, model dùng như 1 tín hiệu
+vĩ mô).
 
-Xuất:
-  data/raw_csv/macro/gold_usd.csv, usdvnd.csv, vnindex.csv  (từng chuỗi thô)
-  data/raw_csv/macro/macro_daily.csv                        (gộp, lịch ngày, ffill)
+Chế độ:
+  (mặc định)            fetch hôm nay -> macro_raw/dt=<today>
+  --backfill START END  fetch dải quá khứ qua API -> macro_raw/dt=backfill-<END>
+                        (vnindex 1 call range; usdvnd/gold loop từng ngày)
 
-macro_daily reindex về lịch NGÀY liên tục rồi forward-fill: giá trị mỗi ngày =
-giá trị phiên gần nhất đã biết → khớp as-of join theo `posted_at` (M6), không leakage.
-
-Chạy:
-  python ml/fetch_macro.py                      # 2018-01-01 -> hôm nay
-  python ml/fetch_macro.py --start 2020-01-01 --end 2026-09-18
+CPI/lãi suất KHÔNG ở đây — chúng monthly, lưu ở bảng Postgres `macro_monthly`
+(nhập/UPSERT qua SQL hoặc UI; xem sql/init.sql). macro_features đọc bảng đó.
+vnstock fail (chế độ daily) -> exit 0 + WARN (daily loop không vỡ; carry-forward).
 """
-from __future__ import annotations
-
-import argparse
+import os
 import sys
-from datetime import date
-from pathlib import Path
+import time
+import argparse
+import datetime
 
-import pandas as pd
+if os.path.basename(os.getcwd()) == "ml":
+    os.chdir("..")
+from config import build_spark, LAKE as _LAKE_ROOT
 
-OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "raw_csv" / "macro"
-
-
-def _close_series(df: pd.DataFrame, name: str) -> pd.Series:
-    """Lấy cột Close từ kết quả yfinance, phẳng về Series (index=Date)."""
-    if df is None or df.empty:
-        raise SystemExit(f"[FAIL] yfinance trả rỗng cho {name}")
-    close = df["Close"]
-    if isinstance(close, pd.DataFrame):  # MultiIndex 1 ticker -> 1 cột
-        close = close.iloc[:, 0]
-    s = close.dropna()
-    s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
-    s.name = name
-    return s
+LAKE = f"{_LAKE_ROOT}/macro_raw"
+TODAY = datetime.date.today().isoformat()
 
 
-def fetch_yf(ticker: str, name: str, start: str, end: str) -> pd.Series:
-    import yfinance as yf
+def _vnindex_history(start: str, end: str) -> dict:
+    """{date_iso: close} cho dải [start,end] — 1 call."""
+    from vnstock import Quote
+    h = Quote(symbol="VNINDEX", source="VCI").history(start=start, end=end, interval="1D")
+    return {str(r["time"])[:10]: float(r["close"]) for _, r in h.iterrows()}
 
-    df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
-    return _close_series(df, name)
+
+def _usdvnd_on(day: str) -> float | None:
+    from vnstock.explorer.misc.exchange_rate import vcb_exchange_rate
+    try:
+        fx = vcb_exchange_rate(date=day)
+        usd = fx[fx["currency_code"] == "USD"]
+        return float(str(usd.iloc[0]["sell"]).replace(",", "")) if len(usd) else None
+    except Exception:
+        return None
 
 
-def fetch_vnindex(start: str, end: str) -> pd.Series:
-    from vnstock import Vnstock
+def _gold_on(day: str) -> float | None:
+    from vnstock.explorer.misc.gold_price import sjc_gold_price
+    try:
+        g = sjc_gold_price(date=day)
+        hcm = g[g["branch"] == "Hồ Chí Minh"]
+        row = hcm.iloc[0] if len(hcm) else (g.iloc[0] if len(g) else None)
+        return float(row["sell_price"]) if row is not None else None
+    except Exception:
+        return None
 
-    df = Vnstock().stock(symbol="VNINDEX", source="VCI").quote.history(
-        start=start, end=end, interval="1D"
-    )
-    if df is None or df.empty:
-        raise SystemExit("[FAIL] vnstock trả rỗng cho VNINDEX")
-    s = df.set_index(pd.to_datetime(df["time"]))["close"].dropna()
-    s.index = s.index.tz_localize(None).normalize()
-    s.name = "vnindex"
-    return s
+
+def _write(rows: list[dict], part: str) -> None:
+    spark = build_spark("fetch-macro")
+    spark.createDataFrame(rows).write.mode("overwrite").parquet(part)
+    spark.stop()
+
+
+def daily() -> int:
+    part = f"{LAKE}/dt={TODAY}"
+    if os.path.isdir(part):
+        print(f"[fetch_macro] {part} đã tồn tại -> bỏ qua")
+        return 0
+    try:
+        vni = _vnindex_history((datetime.date.today() - datetime.timedelta(days=10)).isoformat(), TODAY)
+        row = {
+            "date": TODAY,
+            "gold_usd": _gold_on(TODAY),
+            "usdvnd": _usdvnd_on(TODAY),
+            "vnindex": vni.get(TODAY) or list(vni.values())[-1],
+        }
+    except Exception as e:
+        print(f"[fetch_macro] WARN vnstock fail: {e} -> bỏ qua, dùng carry-forward")
+        return 0
+    _write([row], part)
+    print(f"[fetch_macro] ghi {part}: {row}")
+    return 0
+
+
+def backfill(start: str, end: str, sleep: float = 2.2) -> int:
+    """Fetch dải quá khứ. vnindex forward-fill sang ngày không có phiên
+    (weekend/lễ) bằng giá trị phiên gần nhất trước đó.
+
+    Throttle: mỗi ngày = 2 call (fx+gold). sleep ~2.2s/ngày giữ dưới giới
+    hạn Community 60 req/phút (~54/phút). Có API key sponsor -> giảm sleep.
+    """
+    vni_hist = _vnindex_history(start, end)
+    d0 = datetime.date.fromisoformat(start)
+    d1 = datetime.date.fromisoformat(end)
+    rows, last_vni = [], None
+    n = (d1 - d0).days + 1
+    for i in range(n):
+        day = (d0 + datetime.timedelta(days=i)).isoformat()
+        if day in vni_hist:
+            last_vni = vni_hist[day]
+        rows.append({
+            "date": day,
+            "gold_usd": _gold_on(day),
+            "usdvnd": _usdvnd_on(day),
+            "vnindex": last_vni,
+        })
+        time.sleep(sleep)   # throttle rate limit
+        if (i + 1) % 30 == 0:
+            print(f"[backfill] {i + 1}/{n} ngày...")
+    part = f"{LAKE}/dt=backfill-{end}"
+    _write(rows, part)
+    got_v = sum(1 for r in rows if r["vnindex"] is not None)
+    got_u = sum(1 for r in rows if r["usdvnd"] is not None)
+    got_g = sum(1 for r in rows if r["gold_usd"] is not None)
+    print(f"[backfill] ghi {part}: {len(rows)} ngày "
+          f"(vnindex={got_v}, usdvnd={got_u}, gold={got_g} có giá trị)")
+    return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--start", default="2018-01-01")
-    ap.add_argument("--end", default=date.today().isoformat())
-    args = ap.parse_args()
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    series = {
-        "gold_usd": lambda: fetch_yf("GC=F", "gold_usd", args.start, args.end),
-        "usdvnd": lambda: fetch_yf("VND=X", "usdvnd", args.start, args.end),
-        "vnindex": lambda: fetch_vnindex(args.start, args.end),
-    }
-
-    frames = []
-    for name, fn in series.items():
-        s = fn()
-        s.to_csv(OUT_DIR / f"{name}.csv")
-        print(f"[OK] {name}: {len(s)} phiên, {s.index.min().date()} -> {s.index.max().date()}")
-        frames.append(s)
-
-    # gộp + reindex lịch ngày liên tục + forward-fill
-    merged = pd.concat(frames, axis=1).sort_index()
-    full = pd.date_range(merged.index.min(), merged.index.max(), freq="D")
-    merged = merged.reindex(full).ffill()
-    merged.index.name = "date"
-
-    missing = merged.isna().sum()
-    if missing.any():
-        print(f"[WARN] còn NaN đầu chuỗi (trước phiên đầu tiên): {missing.to_dict()}")
-
-    out = OUT_DIR / "macro_daily.csv"
-    merged.to_csv(out)
-    print(f"[OK] macro_daily: {len(merged)} ngày, {merged.index.min().date()} -> {merged.index.max().date()}")
-    print(f"[OK] ghi {out}")
-    return 0
+    ap.add_argument("--backfill", nargs=2, metavar=("START", "END"))
+    ap.add_argument("--sleep", type=float, default=2.2,
+                    help="giây nghỉ giữa mỗi ngày (rate limit); giảm nếu có key sponsor")
+    a = ap.parse_args()
+    if a.backfill:
+        return backfill(a.backfill[0], a.backfill[1], a.sleep)
+    return daily()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ Chạy:
 import argparse
 import csv
 import json
+import os
 import sys
 import time
 
@@ -54,7 +55,7 @@ def main():
     parser = argparse.ArgumentParser(description="Replay CSV → Kafka")
     parser.add_argument("--csv",       required=True,           help="Đường dẫn file CSV gốc")
     parser.add_argument("--topic",     default="real_estate_raw")
-    parser.add_argument("--bootstrap", default="localhost:9092")
+    parser.add_argument("--bootstrap", default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
     parser.add_argument("--delay",     type=float, default=0.05, help="Giây giữa mỗi message")
     args = parser.parse_args()
 

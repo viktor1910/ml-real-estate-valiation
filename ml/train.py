@@ -27,10 +27,7 @@ Run:
 import os, json, datetime
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, LAKE, MODEL_STORE, META_DIR
 
 from pyspark.sql import SparkSession
 from pyspark.ml import Pipeline
@@ -45,21 +42,16 @@ from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 from pyspark.ml.evaluation import RegressionEvaluator
 import pandas as pd
 
-FEAT_IN   = "data/lake/listings_features/sale"   # input (M6)
+FEAT_IN   = f"{LAKE}/listings_features/sale"   # input (M6)
 LABEL     = "price_per_m2"
 VERSION   = datetime.date.today().isoformat()    # vd 2026-09-17
-MODEL_DIR = f"models/v{VERSION}"
+MODEL_DIR = f"{MODEL_STORE}/v{VERSION}"          # binary model (Spark, có thể s3a)
+META_VDIR = f"{META_DIR}/v{VERSION}"             # metrics.json (driver-local)
 SEED      = 42
 
 # ## 2. Spark + đọc feature dataset + chia train/test (random 80/20)
 
-spark = (
-    SparkSession.builder.appName("M7-train")
-    .master("local[*]")
-    .config("spark.sql.shuffle.partitions", "8")
-    .getOrCreate()
-)
-spark.sparkContext.setLogLevel("WARN")
+spark = build_spark("M7-train")
 
 feat = spark.read.parquet(FEAT_IN)
 train, test = feat.randomSplit([0.8, 0.2], seed=SEED)
@@ -71,40 +63,48 @@ print(f"tổng {feat.count()} | train {n_train} | test {n_test}")
 #
 # Ablation vĩ mô = build 2 bộ đặc trưng giống hệt nhau, chỉ khác việc có đưa `gold_usd/usdvnd/vnindex` vào `VectorAssembler` hay không. Mọi biến đổi per-row nằm trong pipeline → M8 tái dựng y hệt.
 
-# SQLTransformer y hệt M6 (cột phái sinh; tên cột chotot có dấu cách -> backtick)
+# SQLTransformer y hệt M6 (cột phái sinh, schema English)
 DERIVE_SQL = """
     SELECT *,
-        log(`Dien tich`)                              AS log_area,
-        year(`Ngay dang`)                             AS year,
-        month(`Ngay dang`)                            AS month,
-        quarter(`Ngay dang`)                          AS quarter,
-        dayofweek(`Ngay dang`)                        AS dayofweek,
+        log(area)                                     AS log_area,
+        year(posted_at)                               AS year,
+        month(posted_at)                              AS month,
+        quarter(posted_at)                            AS quarter,
+        dayofweek(posted_at)                          AS dayofweek,
         6371 * 2 * asin(sqrt(
-            power(sin(radians(`Vi do` - 10.7769) / 2), 2) +
-            cos(radians(10.7769)) * cos(radians(`Vi do`)) *
-            power(sin(radians(`Kinh do` - 106.7009) / 2), 2)
+            power(sin(radians(latitude - 10.7769) / 2), 2) +
+            cos(radians(10.7769)) * cos(radians(latitude)) *
+            power(sin(radians(longitude - 106.7009) / 2), 2)
         ))                                            AS dist_center,
-        coalesce(`Loai BDS`, 'UNKNOWN')               AS loai_bds_s
+        coalesce(property_type, 'UNKNOWN')            AS property_type_s,
+        coalesce(interior, 'UNKNOWN')                 AS interior_s
     FROM __THIS__
 """
 
 NUM_BASE = [
-    "log_area", "Phong ngu", "Nha ve sinh", "So tang", "rank_quan", "dist_center",
+    "log_area", "bedrooms", "floors", "rank_quan", "dist_center",
     "year", "month", "quarter", "dayofweek",
 ]
-MACRO = ["gold_usd", "usdvnd", "vnindex"]
+from macro_features import MACRO_COLS
+# chỉ dùng cột macro thực sự có trong dataset (gate có thể đã drop hết)
+MACRO = [c for c in MACRO_COLS if c in feat.columns]
+print(f"train: {len(MACRO)} cột macro có trong features")
+if not MACRO:
+    print("train: gate OFF -> ablation macro/no_macro trùng nhau (delta_rmse≈0), đúng thiết kế")
 
 def feature_stages(use_macro: bool):
-    """5 stage đặc trưng M6; toggle 3 cột macro trong assembler."""
+    """Stage đặc trưng M6 (English); toggle 3 cột macro. Categorical: property_type + interior."""
     derive = SQLTransformer(statement=DERIVE_SQL)
-    idx = StringIndexer(inputCol="loai_bds_s", outputCol="loai_idx", handleInvalid="keep")
-    ohe = OneHotEncoder(inputCol="loai_idx", outputCol="loai_ohe", handleInvalid="keep")
+    idx_pt  = StringIndexer(inputCol="property_type_s", outputCol="pt_idx", handleInvalid="keep")
+    ohe_pt  = OneHotEncoder(inputCol="pt_idx", outputCol="pt_ohe", handleInvalid="keep")
+    idx_int = StringIndexer(inputCol="interior_s", outputCol="int_idx", handleInvalid="keep")
+    ohe_int = OneHotEncoder(inputCol="int_idx", outputCol="int_ohe", handleInvalid="keep")
     num = NUM_BASE + (MACRO if use_macro else [])
-    asm = VectorAssembler(inputCols=num + ["loai_ohe"], outputCol="features_raw",
+    asm = VectorAssembler(inputCols=num + ["pt_ohe", "int_ohe"], outputCol="features_raw",
                           handleInvalid="error")
     scaler = StandardScaler(inputCol="features_raw", outputCol="features",
                             withStd=True, withMean=False)
-    return [derive, idx, ohe, asm, scaler]
+    return [derive, idx_pt, ohe_pt, idx_int, ohe_int, asm, scaler]
 
 # ## 4. Regressor + lưới tham số (tuning)
 #
@@ -187,7 +187,7 @@ best_row = min(macro_rows, key=lambda r: r["rmse"])
 best_key = (best_row["model"], "macro")
 best_model = best_models[best_key]
 
-os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(META_VDIR, exist_ok=True)   # metrics.json ghi bằng open() -> cần dir local
 best_model.write().overwrite().save(f"{MODEL_DIR}/model")
 
 metrics = {
@@ -201,12 +201,12 @@ metrics = {
              "rmse": best_row["rmse"], "mae": best_row["mae"], "r2": best_row["r2"]},
     "baseline_rmse": best_row["rmse"],   # M8 drift check so với số này
 }
-with open(f"{MODEL_DIR}/metrics.json", "w") as f:
+with open(f"{META_VDIR}/metrics.json", "w") as f:
     json.dump(metrics, f, ensure_ascii=False, indent=2)
 
 print(f"model tốt nhất (macro): {best_row['model']} | test RMSE={best_row['rmse']:.3f} R2={best_row['r2']:.3f}")
 print(f"lưu -> {MODEL_DIR}/model")
-print(f"metrics -> {MODEL_DIR}/metrics.json | baseline_rmse={metrics['baseline_rmse']:.3f}")
+print(f"metrics -> {META_VDIR}/metrics.json | baseline_rmse={metrics['baseline_rmse']:.3f}")
 
 # ## 8. Verify — nạp lại model + predict thử
 

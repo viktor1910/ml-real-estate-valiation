@@ -16,7 +16,7 @@ Run:
 # **Mục tiêu:** mỗi lô crawl → bảng dự đoán + danh sách top định giá thấp, không train lại.
 #
 # **Kiến trúc:** nạp 1 artifact `PipelineModel` (M7, đã gồm feature stages M6 + RF) →
-# `transform` lô tin mới (đã ghép vĩ mô theo `Ngay dang`) → `prediction` = giá dự đoán (triệu/m²).
+# `transform` lô tin mới (đã ghép vĩ mô theo `posted_at`) → `prediction` = giá dự đoán (triệu/m²).
 #
 # **Quyết định (user chốt 2026-09-17):**
 # - Lô demo = **toàn bộ `listings_clean/sale` (2156 dòng)** — chưa có crawl mới, tái dùng data hiện có.
@@ -33,22 +33,25 @@ Run:
 import os, json, datetime
 if os.path.basename(os.getcwd()) == "ml":
     os.chdir("..")
-os.environ.setdefault(
-    "JAVA_HOME",
-    "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
-)
+from config import build_spark, LAKE, MODEL_STORE, META_DIR, PG_DRIVER_PKG
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.ml import PipelineModel
 from pyspark.ml.evaluation import RegressionEvaluator
 
 # --- Cấu hình (đổi NEW_BATCH khi có crawl mới) ---
-NEW_BATCH  = "data/lake/listings_clean/sale"      # lô tin mới (M5); production: output crawl mới
-MACRO      = "data/raw_csv/macro/macro_daily.csv"
-VERSION    = "2026-09-17"
-MODEL_PATH = f"models/v{VERSION}/model"            # FULL PipelineModel (M7)
-METRICS    = f"models/v{VERSION}/metrics.json"
-PRED_OUT   = "data/lake/predictions/sale"          # output: bảng dự đoán (M9 đọc)
+NEW_BATCH  = os.getenv("SCORE_NEW_BATCH", f"{LAKE}/listings_clean/sale")  # override qua env khi cron truyền lô crawl hôm nay
+MARKET_LAKE = f"{LAKE}/macro_raw"
+MONTHLY_TABLE = os.getenv("PG_MACRO_TABLE", "macro_monthly")  # CPI/lãi suất -> Postgres
+# version model = con trỏ prod đã promote (current.json); fallback env/cứng
+_CUR = f"{META_DIR}/current.json"
+if os.path.exists(_CUR):
+    VERSION = json.load(open(_CUR, encoding="utf-8"))["version"]
+else:
+    VERSION = os.getenv("MODEL_VERSION", "2026-09-17")
+MODEL_PATH = f"{MODEL_STORE}/v{VERSION}/model"     # FULL PipelineModel (M7) — Spark/s3a
+METRICS    = f"{META_DIR}/v{VERSION}/metrics.json" # driver-local
+PRED_OUT   = f"{LAKE}/predictions/sale"            # output: bảng dự đoán (M9 đọc)
 LABEL      = "price_per_m2"                          # giá thực (triệu/m²) — có trong lô để drift check
 
 UNDERVALUED_TH = 0.20     # cờ định giá thấp khi ratio >= 20%
@@ -60,37 +63,16 @@ with open(METRICS) as f:
 DRIFT_TH = DRIFT_MULT * BASELINE_RMSE
 print(f"baseline_rmse={BASELINE_RMSE:.3f} | drift threshold={DRIFT_TH:.3f} (>{DRIFT_MULT}x)")
 
-spark = (
-    SparkSession.builder.appName("M8-score")
-    .master("local[*]")
-    .config("spark.sql.shuffle.partitions", "8")
-    .getOrCreate()
-)
-spark.sparkContext.setLogLevel("WARN")
+spark = build_spark("M8-score", packages=PG_DRIVER_PKG)
 
-# 1) Đọc lô tin mới + GHÉP VĨ MÔ theo Ngay dang (y hệt M6, model không tự join được)
+# 1) Đọc lô tin mới + GHÉP VĨ MÔ theo posted_at (y hệt M6 qua macro_features)
+from macro_features import attach_macro
+
 listings = spark.read.parquet(NEW_BATCH)
 print("lô mới:", listings.count(), "dòng,", len(listings.columns), "cột")
 
-macro = (
-    spark.read.option("header", True).csv(MACRO)
-    .withColumn("d", F.to_date("date"))
-    .withColumn("gold_usd", F.col("gold_usd").cast("double"))
-    .withColumn("usdvnd",   F.col("usdvnd").cast("double"))
-    .withColumn("vnindex",  F.col("vnindex").cast("double"))
-    .select("d", "gold_usd", "usdvnd", "vnindex")
-)
-listings = listings.withColumn("posted_date", F.to_date("Ngay dang"))
-feat = listings.join(macro, listings["posted_date"] == macro["d"], "left").drop("d")
-
-miss = feat.filter(
-    F.col("vnindex").isNull() | F.col("gold_usd").isNull() | F.col("usdvnd").isNull()
-).count()
-if miss:
-    print(f"⚠ {miss} dòng ngoài cửa sổ macro (null vĩ mô) — mở rộng fetch_macro --start; "
-          "VectorAssembler handleInvalid=error sẽ chặn các dòng này")
-else:
-    print("macro coverage: đủ, 0 dòng thiếu")
+feat, gate_on = attach_macro(spark, listings, MARKET_LAKE, MONTHLY_TABLE)
+print(f"macro gate_on={gate_on}")
 
 # 2) Nạp FULL PipelineModel + transform → prediction (giá dự đoán triệu/m²)
 model = PipelineModel.load(MODEL_PATH)
@@ -107,7 +89,7 @@ scored = (
     .withColumn("is_undervalued", F.col("undervalued_ratio") >= F.lit(UNDERVALUED_TH))
     # giá tổng (VND) cho dễ đọc: giá/m² (triệu) * diện tích * 1e6
     .withColumn("predicted_total_vnd",
-                F.round(F.col("predicted_ppm2") * F.col("Dien tich") * 1e6).cast("long"))
+                F.round(F.col("predicted_ppm2") * F.col("area") * 1e6).cast("long"))
 )
 n_scored = scored.count()
 n_under  = scored.filter("is_undervalued").count()
@@ -135,19 +117,33 @@ if drift:
 else:
     print(f"🟢 OK: RMSE {batch_rmse:.3f} <= {DRIFT_TH:.3f} → không cần retrain")
 
+# 4b) GHI CỜ DRIFT — cron/orchestrator đọc file này để quyết định có retrain không.
+#     Tách tín hiệu khỏi hành động: score chỉ báo, không tự train.
+FLAG_OUT = os.getenv("RETRAIN_FLAG", f"{META_DIR}/retrain_needed.json")
+with open(FLAG_OUT, "w", encoding="utf-8") as f:
+    json.dump({
+        "drift": bool(drift),
+        "batch_rmse": round(batch_rmse, 3),
+        "baseline_rmse": round(BASELINE_RMSE, 3),
+        "drift_threshold": round(DRIFT_TH, 3),
+        "model_version": VERSION,
+        "checked_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }, f, ensure_ascii=False, indent=2)
+print(f"cờ drift -> {FLAG_OUT} (drift={drift})")
+
 # 5) Bảng dự đoán (cột cho M9) + ghi parquet + top định giá thấp
 SCORED_AT = datetime.datetime.now().isoformat(timespec="seconds")
 preds = (
     scored.select(
-        F.col("STT").alias("id"),
-        F.col("Quan/Huyen").alias("district"),
-        F.col("Dien tich").alias("area_m2"),
+        F.col("ad_id").alias("id"),
+        F.col("district").alias("district"),
+        F.col("area").alias("area_m2"),
         F.round(F.col(LABEL), 2).alias("listing_ppm2"),          # giá thực (triệu/m²)
         F.round(F.col("predicted_ppm2"), 2).alias("predicted_ppm2"),
         F.col("predicted_total_vnd"),
         F.round(F.col("undervalued_ratio"), 4).alias("undervalued_ratio"),
         F.col("is_undervalued"),
-        F.col("URL"),
+        F.col("url"),
         F.lit(VERSION).alias("model_version"),
         F.lit(SCORED_AT).alias("scored_at"),
     )
@@ -159,7 +155,7 @@ print("\n=== TOP 15 ĐỊNH GIÁ THẤP (undervalued_ratio giảm dần) ===")
 (preds.filter("is_undervalued")
       .orderBy(F.col("undervalued_ratio").desc())
       .select("district", "area_m2", "listing_ppm2", "predicted_ppm2",
-              "undervalued_ratio", "predicted_total_vnd", "URL")
+              "undervalued_ratio", "predicted_total_vnd", "url")
       .show(15, truncate=60))
 
 print("=== Số tin định giá thấp theo quận ===")
