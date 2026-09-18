@@ -41,4 +41,7 @@ else
   echo "🟢 không drift → giữ model hiện tại"
 fi
 
+# 7) nạp bảng dự đoán -> Postgres (serving M9). Non-fatal: DB down không chặn pipeline.
+$PY ml/load_predictions.py || echo "⚠ load_predictions lỗi -> bỏ qua (Postgres down?)"
+
 echo "===== DAILY XONG ====="

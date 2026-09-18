@@ -1,5 +1,5 @@
 # --- binary / generated artifacts ---
-data/
+
 models/*
 
 # --- Python ---
