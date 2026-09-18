@@ -44,7 +44,8 @@ from pyspark.ml.evaluation import RegressionEvaluator
 
 # --- Cấu hình (đổi NEW_BATCH khi có crawl mới) ---
 NEW_BATCH  = os.getenv("SCORE_NEW_BATCH", "data/lake/listings_clean/sale")  # override qua env khi cron truyền lô crawl hôm nay
-MACRO      = "data/raw_csv/macro/macro_daily.csv"
+MARKET_LAKE = "data/lake/macro_raw"
+MONTHLY_CSV = "data/raw_csv/macro/cpi_rate_monthly.csv"
 # version model = con trỏ prod đã promote (models/current.json); fallback env/cứng
 _CUR = "models/current.json"
 if os.path.exists(_CUR):
@@ -73,31 +74,14 @@ spark = (
 )
 spark.sparkContext.setLogLevel("WARN")
 
-# 1) Đọc lô tin mới + GHÉP VĨ MÔ theo posted_at (y hệt M6, model không tự join được)
+# 1) Đọc lô tin mới + GHÉP VĨ MÔ theo posted_at (y hệt M6 qua macro_features)
+from macro_features import attach_macro
+
 listings = spark.read.parquet(NEW_BATCH)
 print("lô mới:", listings.count(), "dòng,", len(listings.columns), "cột")
 
-macro = (
-    spark.read.option("header", True).csv(MACRO)
-    .withColumn("d", F.to_date("date"))
-    .withColumn("gold_usd", F.col("gold_usd").cast("double"))
-    .withColumn("usdvnd",   F.col("usdvnd").cast("double"))
-    .withColumn("vnindex",  F.col("vnindex").cast("double"))
-    .select("d", "gold_usd", "usdvnd", "vnindex")
-)
-listings = listings.withColumn("posted_date", F.to_date("posted_at"))
-feat = listings.join(macro, listings["posted_date"] == macro["d"], "left").drop("d")
-
-miss = feat.filter(
-    F.col("vnindex").isNull() | F.col("gold_usd").isNull() | F.col("usdvnd").isNull()
-).count()
-if miss:
-    # as-of carry-forward: post sau ngày macro cuối -> dùng phiên macro gần nhất (y hệt feature_pipeline)
-    last = macro.orderBy(F.col("d").desc()).first()
-    feat = feat.fillna({"gold_usd": last["gold_usd"], "usdvnd": last["usdvnd"], "vnindex": last["vnindex"]})
-    print(f"⚠ {miss} dòng ngoài cửa sổ macro -> carry-forward bằng macro ngày {last['d']}")
-else:
-    print("macro coverage: đủ, 0 dòng thiếu")
+feat, gate_on = attach_macro(spark, listings, MARKET_LAKE, MONTHLY_CSV)
+print(f"macro gate_on={gate_on}")
 
 # 2) Nạp FULL PipelineModel + transform → prediction (giá dự đoán triệu/m²)
 model = PipelineModel.load(MODEL_PATH)
