@@ -96,3 +96,25 @@ def test_monthly_has_all_monthly_cols(spark):
     out = build_monthly_windows(df)
     for c in MONTHLY_COLS:
         assert c in out.columns
+
+
+def test_load_macro_forward_fills_gaps(spark, tmp_path):
+    from macro_features import load_macro
+    import pandas as pd
+    # market lake với LỖ HỔNG ngày (chỉ 2 mốc), phải fill liên tục
+    mk = spark.createDataFrame(
+        [("2025-01-01", 1.0, 10.0, 100.0),
+         ("2025-01-05", 1.0, 10.0, 104.0)],
+        ["date", "gold_usd", "usdvnd", "vnindex"],
+    )
+    mpath = str(tmp_path / "macro_raw")
+    mk.write.parquet(mpath)
+    csv = str(tmp_path / "m.csv")
+    pd.DataFrame({"month": [f"2025-{m:02d}" for m in range(1, 13)],
+                  "cpi": [100.0 + m for m in range(1, 13)],
+                  "rate": [4.0] * 12}).to_csv(csv, index=False)
+    daily, monthly = load_macro(spark, mpath, csv)
+    days = [r["d"].isoformat() for r in daily.select("d").orderBy("d").collect()]
+    assert days == ["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-04", "2025-01-05"]
+    assert "gold" in daily.columns and "vnindex_90d_ma" in daily.columns
+    assert "cpi_1m_lag" in monthly.columns

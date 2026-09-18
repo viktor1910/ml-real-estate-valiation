@@ -65,6 +65,41 @@ def build_monthly_windows(monthly_df):
     return out
 
 
+def load_macro(spark, market_path, monthly_csv):
+    """Nạp market lake + monthly csv -> (daily_windows, monthly_windows).
+
+    Forward-fill market ra mọi calendar day trong [min,max] để lag theo
+    dòng == lag theo ngày. Monthly build lag; daily build MA/pct.
+    """
+    raw = (spark.read.parquet(market_path)
+           .withColumn("d", F.to_date("date"))
+           .withColumn("gold", F.col("gold_usd").cast("double"))
+           .withColumn("usdvnd", F.col("usdvnd").cast("double"))
+           .withColumn("vnindex", F.col("vnindex").cast("double"))
+           .select("d", "gold", "usdvnd", "vnindex"))
+
+    bounds = raw.select(F.min("d").alias("lo"), F.max("d").alias("hi")).first()
+    cal = spark.sql(
+        f"SELECT explode(sequence(to_date('{bounds['lo']}'), "
+        f"to_date('{bounds['hi']}'), interval 1 day)) AS d")
+    # left join lịch đầy đủ + forward-fill bằng last non-null theo ngày
+    j = cal.join(raw, "d", "left")
+    w_ff = Window.orderBy(F.unix_date(F.col("d"))).rowsBetween(
+        Window.unboundedPreceding, 0)
+    for s in ("gold", "usdvnd", "vnindex"):
+        j = j.withColumn(s, F.last(s, ignorenulls=True).over(w_ff))
+
+    daily = build_market_windows(j).withColumn(
+        "month", F.date_format("d", "yyyy-MM"))
+
+    monthly_raw = (spark.read.option("header", True).csv(monthly_csv)
+                   .withColumn("cpi", F.col("cpi").cast("double"))
+                   .withColumn("rate", F.col("rate").cast("double"))
+                   .select("month", "cpi", "rate"))
+    monthly = build_monthly_windows(monthly_raw)
+    return daily, monthly
+
+
 def gate_decision(span_days: int, distinct_months: int) -> tuple[bool, str]:
     """Quyết định bật/tắt cột macro theo độ sâu thời gian của pool."""
     on = span_days >= GATE_MIN_SPAN_DAYS and distinct_months >= GATE_MIN_MONTHS
