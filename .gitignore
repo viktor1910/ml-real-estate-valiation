@@ -1,8 +1,6 @@
 # --- binary / generated artifacts ---
-data/lake/
-models/*/model/
-models/*/stages/
-models/feature_pipeline/
+data/
+models/*
 
 # --- Python ---
 __pycache__/

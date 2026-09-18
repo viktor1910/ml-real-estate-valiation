@@ -54,6 +54,7 @@ class ChotOtSpider(scrapy.Spider):
 
     API_BASE = "https://gateway.chotot.com/v1/public/ad-listing"
     LIMIT = 20
+    REGION_HCM = 13000            # region_v2 chotot cho Tp Hồ Chí Minh — lọc ngay API, khỏi cào toàn quốc
 
     custom_settings = {
         "CLOSESPIDER_ITEMCOUNT": 1000,
@@ -218,8 +219,10 @@ class ChotOtSpider(scrapy.Spider):
         return item
 
     def _build_url(self, cg, page):
-        # Không lọc region ở đây — ETL M5 filter city="Tp Hồ Chí Minh"
-        return f"{self.API_BASE}?cg={cg}&page={page}&limit={self.LIMIT}"
+        # HCM (region_v2) + phân trang bằng OFFSET o=(page-1)*limit — chotot bỏ qua param `page`,
+        # chỉ `o` mới tiến trang (đã verify: page=1 == page=2, o=0 != o=20).
+        offset = (page - 1) * self.LIMIT
+        return f"{self.API_BASE}?cg={cg}&region_v2={self.REGION_HCM}&o={offset}&limit={self.LIMIT}"
 
     def handle_error(self, failure):
         self.logger.error(f"Request failed: {failure.request.url}")
