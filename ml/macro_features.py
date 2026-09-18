@@ -76,7 +76,8 @@ def load_macro(spark, market_path, monthly_csv):
            .withColumn("gold", F.col("gold_usd").cast("double"))
            .withColumn("usdvnd", F.col("usdvnd").cast("double"))
            .withColumn("vnindex", F.col("vnindex").cast("double"))
-           .select("d", "gold", "usdvnd", "vnindex"))
+           .select("d", "gold", "usdvnd", "vnindex")
+           .dropDuplicates(["d"]))   # backfill + daily có thể trùng ngày
 
     bounds = raw.select(F.min("d").alias("lo"), F.max("d").alias("hi")).first()
     cal = spark.sql(
@@ -130,17 +131,19 @@ def attach_macro(spark, listings, market_path, monthly_csv):
         return listings.drop("posted_date", "posted_month"), False
 
     daily, monthly = load_macro(spark, market_path, monthly_csv)
+    last_day = daily.orderBy(F.col("d").desc()).first()
+    last_month = monthly.orderBy(F.col("month").desc()).first()
 
-    # as-of daily theo ngày; dòng sau ngày macro cuối -> carry-forward
+    # as-of daily theo ngày; dòng sau ngày macro cuối -> carry-forward.
+    # fillna null-safe: chỉ carry-forward cột có giá trị (macro backfill đủ
+    # lịch sử thì mọi cột non-null; đề phòng lịch sử thiếu vẫn không NPE).
     dsel = daily.select(F.col("d").alias("d_join"), *MARKET_COLS)
     df = listings.join(dsel, listings["posted_date"] == dsel["d_join"], "left").drop("d_join")
-    last_day = daily.orderBy(F.col("d").desc()).first()
-    df = df.fillna({c: last_day[c] for c in MARKET_COLS})
+    df = df.fillna({c: last_day[c] for c in MARKET_COLS if last_day[c] is not None})
 
     # monthly theo tháng; tháng ngoài bảng -> carry-forward tháng cuối
     msel = monthly.select(F.col("month").alias("m_join"), *MONTHLY_COLS)
     df = df.join(msel, df["posted_month"] == msel["m_join"], "left").drop("m_join")
-    last_month = monthly.orderBy(F.col("month").desc()).first()
-    df = df.fillna({c: last_month[c] for c in MONTHLY_COLS})
+    df = df.fillna({c: last_month[c] for c in MONTHLY_COLS if last_month[c] is not None})
 
     return df.drop("posted_date", "posted_month"), True
