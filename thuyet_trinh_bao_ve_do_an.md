@@ -39,7 +39,7 @@
 |---|---|---|
 | **chotot gateway API** (`gateway.chotot.com/v1/public/ad-listing`) | Nguồn tin BĐS chính | JSON public, không cần key. Lọc thẳng `region_v2=13000` = HCM |
 | **vnstock** (VCI/VCB/SJC) | Vĩ mô nhịp ngày: VN-Index, USD/VND, giá vàng | Fail thì carry-forward, không vỡ pipeline |
-| **CSV nhập tay** (`cpi_rate_monthly.csv`) | CPI + lãi suất nhịp tháng | Deterministic → không dùng API cho việc code làm được |
+| **Bảng Postgres `macro_monthly`** | CPI + lãi suất nhịp tháng | **THAY cho CSV nhập tay cũ.** Nhập/sửa qua **dashboard** (UPSERT theo tháng); `macro_features.load_macro()` đọc bảng này qua **JDBC**, không còn đọc CSV |
 
 **Target:** `price_per_m2` thay vì tổng giá → chuẩn hoá theo diện tích, giảm phương sai (căn 30m² và 300m² so sánh được).
 
@@ -61,12 +61,15 @@
 - **Khuyết điểm:** nặng JVM, tốn RAM; overkill với dữ liệu nhỏ (xem mục 6 — trung thực).
 - **Case study:** Alibaba, Shopify, ngân hàng dùng Spark cho ETL + scoring hàng tỷ dòng.
 
-### 2.3 PostgreSQL (kho phục vụ)
+### 2.3 PostgreSQL (kho phục vụ + nguồn vĩ mô + auth)
 
-- **Vai trò:** lưu bảng `predictions` cho dashboard/truy vấn cuối (M9).
-- **Quyết định chốt:** dùng **quan hệ (PostgreSQL)**, KHÔNG NoSQL — vì output là bảng có schema cố định, cần truy vấn phân tích (`WHERE is_undervalued`, `GROUP BY district`). NoSQL không mang lại lợi ích ở đây → chọn đúng công cụ thay vì chạy theo buzzword.
+- **Vai trò (đã mở rộng):** không còn là "sink thuần". Nay giữ **3 bảng** (`sql/init.sql`):
+  - `predictions` — output đã chấm (M9 đã hoàn thành, `ml/load_predictions.py` append vào).
+  - `macro_monthly` — CPI + lãi suất nhịp tháng (`month` PK), **thay CSV nhập tay**; Spark đọc qua JDBC lúc feature/score, dashboard UPSERT lúc nhập tay.
+  - `users` — tài khoản đăng nhập dashboard (`password_hash` = bcrypt, không lưu plaintext).
+- **Quyết định chốt:** dùng **quan hệ (PostgreSQL)**, KHÔNG NoSQL — vì output là bảng có schema cố định, cần truy vấn phân tích (`WHERE is_undervalued`, `GROUP BY district`) + UPSERT theo khoá (`month`, `username`). NoSQL không mang lại lợi ích ở đây → chọn đúng công cụ thay vì chạy theo buzzword.
 
-> **Điểm nhấn khi bảo vệ:** đề cho chọn *NoSQL* HOẶC *hệ thống real-time*. Nhóm chọn **real-time (Kafka+Spark Streaming)** làm trọng tâm Big Data, PostgreSQL chỉ là sink.
+> **Điểm nhấn khi bảo vệ:** đề cho chọn *NoSQL* HOẶC *hệ thống real-time*. Nhóm chọn **real-time (Kafka+Spark Streaming)** làm trọng tâm Big Data; PostgreSQL là tầng phục vụ + nguồn cấu hình vĩ mô.
 
 ---
 
@@ -93,20 +96,28 @@ data/lake/listings_raw  (Parquet, dt=…)          ← RAW landing
    │  pipeline → train → promote-if-better            │
    │      → models/v<date>/model  (FULL PipelineModel)│
    └───┬─────────────────────────────────────────────┘
-       │ LUỒNG B (SERVE hàng ngày, ml/run_daily.sh)
+       │ LUỒNG B (SERVE hàng ngày, run_daily.sh — ở project root)
        ▼
 [fetch_macro] → [impute_apply(serve)] → [score_new] → data/lake/predictions/sale
        │                                    │ ghi cờ drift → models/retrain_needed.json
-       │                                    ▼
-       │                          nếu drift ⇒ gọi lại LUỒNG A
-       ▼
-[PostgreSQL: predictions]  →  [Dashboard / báo cáo]
+       │                                    ▼                         │
+       │                          nếu drift ⇒ gọi lại LUỒNG A         │ [load_predictions.py]
+       ▼                                                              ▼
+[PostgreSQL]  ── predictions ─────────────────────────────►  APPEND bảng predictions
+     ▲  │
+     │  └── macro_monthly (CPI/lãi suất) ──JDBC──► feature_pipeline / score_new (as-of join)
+     │
+     └── [Dashboard Streamlit]  (auth bcrypt)  ── nhập/sửa CPI (UPSERT) + xem báo cáo
+              └── public demo qua Cloudflare quick tunnel (dashboard/run.sh)
 ```
 
 **Nguyên lý cốt lõi — tách 2 luồng:**
 - **Luồng A = Train** (đắt, thỉnh thoảng): chỉ chạy khi phát hiện **drift**.
 - **Luồng B = Serve** (rẻ, hàng ngày): chỉ `load model → transform`, không train lại.
 - **Score chỉ báo tín hiệu** (ghi cờ), **không tự train** → tách tín hiệu khỏi hành động.
+- **Postgres là trục 2 chiều:** vừa là *sink* (predictions) vừa là *source* (macro_monthly đọc ngược vào feature/score) vừa là *store auth* (users).
+
+**Cấu hình & lưu trữ tách tầng — `ml/config.py` (nguồn cấu hình DUY NHẤT):** mọi path/master/JAVA_HOME/Postgres đọc từ env, **mặc định = hành vi local cũ**. Prod override qua `.env` để chạy phân tán: LAKE + MODEL_STORE lên `s3a://` (MinIO/S3, executor truy cập), META_DIR (JSON nhỏ, chỉ driver `open()`) ở volume local. Chi tiết deploy: [DEPLOY.md](DEPLOY.md).
 
 ---
 
@@ -149,6 +160,7 @@ data/lake/listings_raw  (Parquet, dt=…)          ← RAW landing
 ### 4.6 Đặc trưng + ghép vĩ mô — `ml/feature_pipeline.py` + `ml/macro_features.py`
 
 **`macro_features.py` — module vĩ mô dùng chung** (train + serve gọi cùng hàm → chống lệch):
+- **Nguồn vĩ mô 2 tầng:** thị trường nhịp ngày đọc từ **Parquet lake** (`macro_raw`, do `fetch_macro` ghi); CPI/lãi suất nhịp tháng đọc từ **bảng Postgres `macro_monthly`** qua JDBC (`config.pg_read`) — **không còn CSV**.
 - Đặc trưng vĩ mô **trailing** (chống leakage): thị trường 90d MA + 90d %; CPI/lãi suất lag 1/3/6 tháng (min lag = 1 tháng).
 - **GATE (điểm nhấn kỹ thuật):** chỉ bật cột vĩ mô khi pool đủ sâu thời gian:
   ```
@@ -185,18 +197,37 @@ data/lake/listings_raw  (Parquet, dt=…)          ← RAW landing
   - mới tệ hơn → **giữ cũ** (rollback tự nhiên, không đè mù).
 - Deterministic, không Spark (đúng nguyên tắc: việc code làm được thì không dùng model).
 
-### 4.10 Điều phối — `ml/run_daily.sh` (serve) & `ml/retrain.sh` (train)
+### 4.10 Điều phối — `run_daily.sh` (serve, ở project root) & `ml/retrain.sh` (train)
 
-`run_daily.sh` (cron 2h sáng):
+`run_daily.sh` (cron 2h sáng; prod: `docker compose run --rm ml-app bash run_daily.sh`):
 ```
 0) fetch_macro          → macro_raw lake (fail → carry-forward)
-1-2) crawl → Kafka → raw parquet   (bật khi Kafka chạy; demo comment)
+1) replay_producer      → Kafka (mặc định replay CSV seed; crawl thật bật khi spider verify)
+2) kafka_to_parquet     → raw parquet landing (availableNow, checkpoint tích lũy)
 3) clean_parse          → pool (append dt hôm nay)
 4) impute_apply serve   → scored_input (giữ mọi tin)
 5) score_new            → predictions + ghi cờ drift
-6) đọc cờ → NẾU drift ⇒ bash retrain.sh   (promote-if-better)
+6) đọc cờ → NẾU drift ⇒ bash ml/retrain.sh   (promote-if-better)
+7) load_predictions     → APPEND bảng Postgres predictions (non-fatal nếu DB down)
 ```
-`retrain.sh`: `impute_fit → impute_apply(train) → feature_pipeline → train → promote`.
+- **Bước Kafka (1-2) nay CHẠY thật** trong daily loop (không còn comment), có fallback `|| echo` nếu Kafka/DB down → pipeline không vỡ. Nguồn tin mặc định là replay CSV seed cho ổn định demo; crawl live chỉ cần bật 1 dòng khi spider verify xong.
+
+`ml/retrain.sh`: `impute_fit → impute_apply(train) → feature_pipeline → train → promote`.
+
+### 4.11 Nạp kho phục vụ (M9) — `ml/load_predictions.py`
+
+- Đọc `predictions/sale` (parquet output của score) → cast `id`/`scored_at` khớp `sql/init.sql` → **APPEND** vào bảng Postgres `predictions` qua JDBC.
+- **Append (không dedup):** giữ lịch sử theo `scored_at` + `model_version` → dashboard chọn được từng đợt chấm.
+- JDBC jar tự tải qua `spark.jars.packages=org.postgresql:postgresql:42.7.4`. Non-fatal trong `run_daily` → DB down không chặn pipeline.
+
+### 4.12 Tầng trình bày — Dashboard Streamlit (`dashboard/`)
+
+- **2 trang** (`dashboard/Home.py` + `dashboard/pages/1_CPI_Entry.py`), UI **tiếng Việt**:
+  - **Báo cáo dự đoán:** chọn đợt chấm → metric (số dòng, % định giá thấp, giá TB) + lọc theo quận/cờ + 3 biểu đồ (giá thực vs dự đoán theo quận; đếm định giá thấp; phân bố % chênh lệch).
+  - **Nhập CPI/lãi suất:** form UPSERT bảng `macro_monthly` (prefill tháng đã có = chỉnh sửa; tháng mới = thêm) — đây là cách nhập vĩ mô thay CSV.
+- **Xác thực bắt buộc (`dashboard/auth.py`):** mọi trang gọi `require_login()` trước khi render; mật khẩu **bcrypt** trong bảng `users`; tạo user bằng `dashboard/manage_users.py`. Lý do: demo mở qua tunnel công khai → chặn người lạ ghi CPI gây nhiễu pipeline.
+- **Demo công khai:** `dashboard/run.sh` chạy Streamlit + **Cloudflare quick tunnel** (`*.trycloudflare.com`) → chia sẻ URL không cần deploy server.
+- **Tái dùng cấu hình:** `dashboard/db.py` import thẳng `PG_*` từ `ml/config.py` → không nhân đôi thông tin kết nối.
 
 ---
 
@@ -206,20 +237,27 @@ data/lake/listings_raw  (Parquet, dt=…)          ← RAW landing
 ```bash
 cd "/Users/viktornguyen/Desktop/viktor/Machine learning"
 source .venv/bin/activate
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+# JAVA_HOME nay tự dò trong ml/config.py (mac homebrew vs Linux) — export chỉ khi cần ghi đè
 ```
-- Python 3.14, **PySpark 4.2.0**, Scrapy 2.19, vnstock, pandas. Java: **OpenJDK 17** (bắt buộc cho Spark).
+- Dev: **Python 3.14** (`.venv`). Container prod: **Python 3.11** (ổn định + tương thích pyspark 4.2 tốt hơn — pin trong `requirements.txt`).
+- **PySpark 4.2.0**, Scrapy 2.19, vnstock, pandas, streamlit, psycopg2, bcrypt. Java: **OpenJDK 17** (bắt buộc cho Spark).
 
 ### 5.2 Hạ tầng (Docker)
 ```bash
-docker compose up -d          # Kafka 3.7 (KRaft, không Zookeeper) + PostgreSQL 15
+# Dev local (chỉ hạ tầng phụ trợ):
+docker compose up -d kafka postgres    # Kafka 3.7 (KRaft, không Zookeeper) + PostgreSQL 15
+# Prod phân tán (thêm object store + cụm Spark):
+docker compose up -d minio kafka postgres spark-master
+docker compose up -d --scale spark-worker=2 spark-worker
 ```
-- Kafka cổng 9092, auto-create topic. Postgres `realestate/admin`, tự chạy `sql/init.sql` tạo bảng `predictions`.
+- Kafka cổng 9092, auto-create topic. Postgres `realestate/admin`, tự chạy `sql/init.sql` tạo 3 bảng (`predictions`, `macro_monthly` + seed CPI, `users`).
+- Prod thêm **MinIO** (S3 tương thích) làm shared storage cho lake + model, và **cụm Spark standalone** (master + N worker). `docker-compose.yml` đã gắn `platform: linux/arm64` cho máy Apple Silicon. Chi tiết: [DEPLOY.md](DEPLOY.md).
 
 ### 5.3 Kết nối & tham số Spark (trong code)
-- Tạo session: `SparkSession.builder.master("local[*]")` — chạy local đa nhân.
-- `spark.sql.shuffle.partitions=8` (giảm từ 200 mặc định → hợp dữ liệu nhỏ, nhanh hơn).
-- Kafka connector: `spark.jars.packages=org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0`.
+- Tạo session: mọi job dùng chung `config.build_spark(app_name, packages=…)` — **không còn hardcode**. `master` = env `SPARK_MASTER` (default `local[*]` cho dev; prod = `spark://spark-master:7077`). Tự bật cấu hình **S3A (MinIO)** khi path là `s3a://`.
+- `spark.sql.shuffle.partitions` = env (default 8 local, 16 prod) — giảm từ 200 mặc định → hợp dữ liệu nhỏ.
+- **Bộ jar (`SPARK_JARS_PACKAGES`, prod .env):** `hadoop-aws:3.5.0` + `spark-sql-kafka-0-10_2.13:4.2.0` + `postgresql:42.7.4`.
+  > ⚠️ **Xung đột phiên bản đã chốt (Rule 7):** tài liệu cũ từng ghi connector Kafka `..._2.12:3.5.0`. **Sai** với stack hiện tại — PySpark 4.2 dùng Scala **2.13** + Hadoop bundle **3.5.0**, nên đúng phải là `spark-sql-kafka-0-10_2.13:4.2.0` và `hadoop-aws:3.5.0` (khớp bundle). Đã theo giá trị trong `.env.example` (mới hơn, đã test build).
 - Streaming: `trigger(availableNow=True)` + `checkpointLocation` (đọc offset mới rồi dừng).
 - ML tuning: `CrossValidator(numFolds=3, parallelism=2)`, `ParamGridBuilder` (regParam/elasticNet cho LR; numTrees/maxDepth cho RF; maxDepth/maxIter cho GBT).
 - Ghi chú kỹ thuật: PySpark 4.2 **không cast DATE→INT** → dùng `F.unix_date()` cho window `rangeBetween`.
@@ -250,11 +288,13 @@ docker compose up -d          # Kafka 3.7 (KRaft, không Zookeeper) + PostgreSQL
 - Output `predictions/sale`: mỗi tin có `predicted_ppm2`, `undervalued_ratio`, `is_undervalued`, top-15 định giá thấp theo quận (demo trên slide).
 
 ### 6.4 Kịch bản demo trực tiếp (đề xuất trình chiếu)
-1. `docker compose up -d` → show Kafka + Postgres chạy.
+1. `docker compose up -d kafka postgres` → show Kafka + Postgres chạy.
 2. `python ml/fetch_macro.py` → lake vĩ mô.
-3. `bash ml/run_daily.sh` → chạy hết luồng serve, in cờ drift.
-4. Mở `predictions` → show top tin định giá thấp.
-5. (Tuỳ) `bash ml/retrain.sh` → show promote-if-better giữ/đổi model.
+3. `bash run_daily.sh` → chạy hết luồng serve (Kafka → parquet → clean → score → nạp Postgres), in cờ drift.
+4. `bash dashboard/manage_users.py <user>` (1 lần) → tạo tài khoản; `bash dashboard/run.sh` → mở dashboard qua Cloudflare tunnel.
+5. Trên dashboard: đăng nhập → **trang Báo cáo** show top tin định giá thấp + biểu đồ; **trang Nhập CPI** UPSERT 1 tháng vĩ mô mới.
+6. (Tuỳ) `bash ml/retrain.sh` → show promote-if-better giữ/đổi model.
+7. (Tuỳ) show deploy phân tán: `docker compose up -d minio spark-master && docker compose up -d --scale spark-worker=2 spark-worker` → Spark UI `:8080` thấy worker ALIVE.
 
 ---
 
@@ -265,13 +305,15 @@ docker compose up -d          # Kafka 3.7 (KRaft, không Zookeeper) + PostgreSQL
 3. **Tách tín hiệu/hành động:** score ghi cờ, orchestrator quyết retrain; promote-if-better chống hồi quy chất lượng.
 4. **Trung thực dữ liệu nhỏ:** gate vĩ mô, ablation báo cáo đúng số, giải thích đánh đổi split — không thổi phồng.
 5. **Đúng công cụ:** Kafka cho velocity, Spark cho batch+ML, Postgres cho serve; không nhồi NoSQL vô nghĩa.
+6. **Sẵn sàng phân tán không đổi code:** `ml/config.py` resolver — mọi path/master/JAVA_HOME/Postgres đọc env, default = local; prod chỉ đổi `.env` để chuyển sang cụm Spark + MinIO/S3 (executor đọc lake qua `s3a://`, không cần đĩa chung). Có Docker image + DEPLOY.md multi-node.
 
 ## PHẦN 8. HẠN CHẾ & HƯỚNG PHÁT TRIỂN (chuẩn bị câu hỏi phản biện)
 
-- **Dữ liệu nhỏ** (~400 dòng train) → Spark "overkill" hiệu năng nhưng đúng yêu cầu công cụ Big Data; cần tích lũy pool nhiều tháng để gate vĩ mô bật.
-- **Kafka/crawl live đang comment** trong `run_daily` (demo tái dùng data) — cần bật khi hạ tầng chạy ổn.
-- Chưa nạp `predictions` vào Postgres tự động (M9) & dashboard (M10) — DDL đã sẵn `sql/init.sql`.
-- Hướng mở rộng: thêm đặc trưng ảnh/mô tả (NLP), mở nhiều tỉnh, chuyển Spark local → cụm.
+- **Dữ liệu nhỏ** (~400 dòng train sau IQR) → Spark "overkill" hiệu năng nhưng đúng yêu cầu công cụ Big Data; cần tích lũy pool nhiều tháng để **gate vĩ mô bật** (hiện GATE=OFF).
+- **Crawl live thật vẫn đang tắt** trong `run_daily` (mặc định replay CSV seed cho ổn định) — Kafka/streaming đã chạy thật; chỉ cần bật 1 dòng `scrapy crawl` khi spider verify xong.
+- **M9 (nạp Postgres) & dashboard (M10) ĐÃ HOÀN THÀNH** — `load_predictions.py` + Streamlit 2 trang có auth + Cloudflare tunnel. (Ghi chú lịch sử: tài liệu bản trước liệt kê 2 mục này là "chưa làm".)
+- Đăng nhập dùng session Streamlit (không token/hết hạn) + tunnel demo — đủ cho bảo vệ, chưa phải hạ tầng auth production.
+- Hướng mở rộng: thêm đặc trưng ảnh/mô tả (NLP), mở nhiều tỉnh, chạy cụm Spark đa máy vật lý thật (DEPLOY.md mục 5 đã mô tả).
 
 ---
 
@@ -291,5 +333,14 @@ docker compose up -d          # Kafka 3.7 (KRaft, không Zookeeper) + PostgreSQL
 | `ml/score_new.py` | Score lô mới + cờ định giá thấp + cờ drift |
 | `ml/promote.py` | Promote-if-better gate |
 | `ml/fetch_macro.py` | Tải vĩ mô vnstock (daily + --backfill) |
-| `ml/run_daily.sh` / `ml/retrain.sh` | Điều phối serve / train |
-| `sql/init.sql`, `docker-compose.yml` | Hạ tầng Postgres + Kafka |
+| `ml/load_predictions.py` | **M9**: nạp predictions parquet → Postgres (append) |
+| `ml/config.py` | **Resolver DUY NHẤT**: path/master/JAVA_HOME/Postgres/S3A từ env |
+| `run_daily.sh` (root) / `ml/retrain.sh` | Điều phối serve / train |
+| `dashboard/Home.py` | Trang báo cáo dự đoán (metric + lọc + 3 biểu đồ) |
+| `dashboard/pages/1_CPI_Entry.py` | Trang nhập/sửa CPI–lãi suất (UPSERT `macro_monthly`) |
+| `dashboard/db.py` | Helper Postgres (query + UPSERT), tái dùng `config.PG_*` |
+| `dashboard/auth.py` / `manage_users.py` | Login gate bcrypt / CLI tạo user |
+| `dashboard/run.sh` | Chạy Streamlit + Cloudflare quick tunnel |
+| `sql/init.sql` | DDL 3 bảng: `predictions`, `macro_monthly` (+seed CPI), `users` |
+| `docker-compose.yml`, `Dockerfile`, `.env.example` | Hạ tầng: Kafka + Postgres + MinIO + cụm Spark |
+| `DEPLOY.md` | Hướng dẫn deploy Linux phân tán (single-host + multi-node) |

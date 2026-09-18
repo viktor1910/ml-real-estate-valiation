@@ -10,8 +10,11 @@
 # ============================================================================
 
 x-app-image: &app-image
+  platform: linux/arm64
   build:
     context: .
+    platforms:
+      - linux/arm64
     args:
       SPARK_JARS_PACKAGES: ${SPARK_JARS_PACKAGES}
   image: realestate-ml:latest
@@ -21,6 +24,7 @@ services:
   # ---------- Object store: data lake + model binary (s3a) ----------
   minio:
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    platform: linux/arm64
     container_name: minio
     command: server /data --console-address ":9001"
     environment:
@@ -40,6 +44,7 @@ services:
   # Tạo bucket + upload CSV seed macro (chạy 1 lần, thoát). Idempotent.
   minio-init:
     image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+    platform: linux/arm64
     depends_on:
       minio:
         condition: service_healthy
@@ -57,6 +62,7 @@ services:
   # ---------- Kafka (KRaft, single broker) ----------
   kafka:
     image: apache/kafka:3.7.0
+    platform: linux/arm64
     container_name: kafka
     ports:
       - "9092:9092"
@@ -81,6 +87,7 @@ services:
   # ---------- Postgres (serving layer M9) ----------
   postgres:
     image: postgres:15-alpine
+    platform: linux/arm64
     container_name: postgres_realestate
     environment:
       POSTGRES_DB: ${PG_DB}
