@@ -1,5 +1,9 @@
 import os
+import sys
 import pytest
+
+# ml/ là nơi các script sống + chạy (sys.path có script dir); test import sibling
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ml"))
 
 os.environ.setdefault(
     "JAVA_HOME",
