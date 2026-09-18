@@ -24,7 +24,8 @@ from pyspark.ml.feature import (
 )
 
 CLEAN     = "data/lake/listings_clean/sale"
-MACRO     = "data/raw_csv/macro/macro_daily.csv"
+MARKET_LAKE = "data/lake/macro_raw"
+MONTHLY_CSV = "data/raw_csv/macro/cpi_rate_monthly.csv"
 FEAT_OUT  = "data/lake/listings_features/sale"
 PIPE_PATH = "models/feature_pipeline"
 HCM_LAT, HCM_LON = 10.7769, 106.7009
@@ -35,32 +36,15 @@ spark = (
 )
 spark.sparkContext.setLogLevel("WARN")
 
+from macro_features import attach_macro, MACRO_COLS
+
 listings = spark.read.parquet(CLEAN)
 print("listings_clean:", listings.count(), "dòng,", len(listings.columns), "cột")
 
-macro = (
-    spark.read.option("header", True).csv(MACRO)
-    .withColumn("d", F.to_date("date"))
-    .withColumn("gold_usd", F.col("gold_usd").cast("double"))
-    .withColumn("usdvnd",   F.col("usdvnd").cast("double"))
-    .withColumn("vnindex",  F.col("vnindex").cast("double"))
-    .select("d", "gold_usd", "usdvnd", "vnindex")
-)
-r = macro.select(F.min("d"), F.max("d")).first()
-print("macro_daily:", macro.count(), "ngày,", r[0], "->", r[1])
-
-# as-of join theo posted_at (macro_daily đã forward-fill lịch ngày liên tục)
-listings = listings.withColumn("posted_date", F.to_date("posted_at"))
-feat = listings.join(macro, listings["posted_date"] == macro["d"], "left").drop("d")
-
-miss = feat.filter(F.col("vnindex").isNull() | F.col("gold_usd").isNull() | F.col("usdvnd").isNull()).count()
-pr = feat.select(F.min("posted_date"), F.max("posted_date")).first()
-print(f"posted_date {pr[0]} -> {pr[1]} | dòng thiếu macro: {miss}")
-if miss:
-    # as-of carry-forward: post sau ngày macro cuối (vd hôm nay) -> dùng phiên macro gần nhất đã biết
-    last = macro.orderBy(F.col("d").desc()).first()
-    feat = feat.fillna({"gold_usd": last["gold_usd"], "usdvnd": last["usdvnd"], "vnindex": last["vnindex"]})
-    print(f"  -> carry-forward {miss} dòng bằng macro ngày {last['d']} (gold={last['gold_usd']}, vnindex={last['vnindex']})")
+# Gate + as-of join macro (trailing lag/rolling). Gate OFF -> 0 cột macro.
+feat, gate_on = attach_macro(spark, listings, MARKET_LAKE, MONTHLY_CSV)
+macro_present = [c for c in MACRO_COLS if c in feat.columns]
+print(f"macro gate_on={gate_on} | {len(macro_present)} cột macro: {macro_present}")
 
 # --- Spark ML Pipeline recipe (English) ---
 derive = SQLTransformer(statement=f"""
@@ -85,11 +69,11 @@ ohe_pt  = OneHotEncoder(inputCol="pt_idx", outputCol="pt_ohe", handleInvalid="ke
 idx_int = StringIndexer(inputCol="interior_s", outputCol="int_idx", handleInvalid="keep")
 ohe_int = OneHotEncoder(inputCol="int_idx", outputCol="int_ohe", handleInvalid="keep")
 
-NUM = [
+NUM_BASE = [
     "log_area", "bedrooms", "floors", "rank_quan", "dist_center",
-    "gold_usd", "usdvnd", "vnindex",
     "year", "month", "quarter", "dayofweek",
 ]
+NUM = NUM_BASE + macro_present   # macro chỉ vào khi gate ON
 asm = VectorAssembler(inputCols=NUM + ["pt_ohe", "int_ohe"], outputCol="features_raw", handleInvalid="error")
 scaler = StandardScaler(inputCol="features_raw", outputCol="features", withStd=True, withMean=False)
 
