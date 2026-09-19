@@ -75,10 +75,11 @@ def main():
         .drop(*DROP_COLS)
     )
 
-    # scope: HCM · chỉ bán (ad_type='s') · giá/area > 0 · dedup url
+    # scope: HCM · chỉ bán (giá > 500 triệu; dưới coi là cho thuê) · area > 0 · dedup url
+    # Ghi chú: seed CSV không có ad_type -> phân loại bán/thuê bằng ngưỡng giá.
     df = df.filter(F.col("city").contains("Hồ Chí Minh"))
-    df = df.filter(F.col("ad_type") == "s")
-    df = df.filter((F.col("price") > 0) & (F.col("area") > 0))
+    df = df.filter(F.col("price") > 500_000_000)
+    df = df.filter(F.col("area") > 0)
     df = df.dropDuplicates(["url"]).drop("ad_type")
 
     # target: price_per_m2 (triệu/m²)
