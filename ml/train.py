@@ -71,11 +71,11 @@ DERIVE_SQL = """
         month(posted_at)                              AS month,
         quarter(posted_at)                            AS quarter,
         dayofweek(posted_at)                          AS dayofweek,
-        6371 * 2 * asin(sqrt(
+        coalesce(6371 * 2 * asin(sqrt(
             power(sin(radians(latitude - 10.7769) / 2), 2) +
             cos(radians(10.7769)) * cos(radians(latitude)) *
             power(sin(radians(longitude - 106.7009) / 2), 2)
-        ))                                            AS dist_center,
+        )), 0.0)                                      AS dist_center,
         coalesce(property_type, 'UNKNOWN')            AS property_type_s,
         coalesce(interior, 'UNKNOWN')                 AS interior_s
     FROM __THIS__
