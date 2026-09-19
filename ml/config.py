@@ -81,6 +81,10 @@ def _s3_conf(builder):
         .config("spark.hadoop.fs.s3a.secret.key", secret)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.connection.ssl.enabled", ssl)
+        # Đệm upload bằng RAM (off-heap) thay đĩa -> tránh lỗi buffer.dir capacity 0
+        # trên worker container. Data nhỏ nên an toàn.
+        .config("spark.hadoop.fs.s3a.fast.upload", "true")
+        .config("spark.hadoop.fs.s3a.fast.upload.buffer", "bytebuffer")
         .config("spark.hadoop.fs.s3a.aws.credentials.provider",
                 "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
     )
