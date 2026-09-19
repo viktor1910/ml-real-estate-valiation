@@ -47,11 +47,6 @@ derive = SQLTransformer(statement=f"""
         month(posted_at)                              AS month,
         quarter(posted_at)                            AS quarter,
         dayofweek(posted_at)                          AS dayofweek,
-        coalesce(6371 * 2 * asin(sqrt(
-            power(sin(radians(latitude - {HCM_LAT}) / 2), 2) +
-            cos(radians({HCM_LAT})) * cos(radians(latitude)) *
-            power(sin(radians(longitude - {HCM_LON}) / 2), 2)
-        )), 0.0)                                      AS dist_center,
         coalesce(property_type, 'UNKNOWN')            AS property_type_s,
         coalesce(interior, 'UNKNOWN')                 AS interior_s
     FROM __THIS__
@@ -63,7 +58,7 @@ idx_int = StringIndexer(inputCol="interior_s", outputCol="int_idx", handleInvali
 ohe_int = OneHotEncoder(inputCol="int_idx", outputCol="int_ohe", handleInvalid="keep")
 
 NUM_BASE = [
-    "log_area", "bedrooms", "floors", "rank_quan", "dist_center",
+    "log_area", "bedrooms", "floors", "rank_quan",
     "year", "month", "quarter", "dayofweek",
 ]
 NUM = NUM_BASE + macro_present   # macro chỉ vào khi gate ON
