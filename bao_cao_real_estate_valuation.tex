@@ -1,0 +1,317 @@
+% =====================================================================
+%  BÁO CÁO ĐỒ ÁN — DỰ BÁO XU HƯỚNG GIÁ BẤT ĐỘNG SẢN (Real Estate Valuation)
+%  Môn: Xử lý & Lưu trữ Dữ liệu lớn
+%
+%  >>> BIÊN DỊCH BẰNG pdfLaTeX (compiler mặc định Overleaf) — không cần đổi gì.
+% =====================================================================
+\documentclass[12pt,a4paper]{article}
+
+% Tiếng Việt chạy được với pdfLaTeX (không cần XeLaTeX/fontspec).
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage{lmodern}
+\usepackage[vietnamese]{babel}
+
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=black, urlcolor=blue, citecolor=black}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds}
+
+% --- style cho code ---
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekw}{RGB}{0,0,180}
+\definecolor{codecm}{RGB}{0,120,0}
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecm}\itshape,
+  breaklines=true,
+  frame=single,
+  captionpos=b,
+  showstringspaces=false,
+  columns=fullflexible,
+}
+
+\title{\textbf{BÁO CÁO ĐỒ ÁN}\\[0.4cm]
+\large Dự báo xu hướng giá Bất động sản tự động\\
+(Real Estate Valuation)\\[0.3cm]
+\normalsize Hệ thống xử lý dữ liệu lớn phân tán: Scrapy $\rightarrow$ Kafka $\rightarrow$ Spark $\rightarrow$ PostgreSQL}
+\author{Nhóm thực hiện đề tài}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent Báo cáo trình bày một hệ thống dữ liệu lớn hoàn chỉnh nhằm \textbf{dự đoán giá hợp lý của bất động sản} tại TP.\ Hồ Chí Minh và phát hiện các tin \textbf{đang bị định giá thấp}. Hệ thống thu thập tin rao bán hằng ngày từ Chợ Tốt bằng \textit{Scrapy}, đẩy qua hàng đợi \textit{Apache Kafka}, xử lý ETL và huấn luyện học máy trên \textit{cụm Apache Spark phân tán} (Spark SQL + MLlib), kết hợp dữ liệu vĩ mô (CPI, lãi suất, vàng, tỷ giá, VNINDEX), rồi phục vụ kết quả qua \textit{PostgreSQL} và một dashboard web \textit{Streamlit}. Điểm nhấn của đề tài là kiến trúc \textbf{phân tán thật sự} (nhiều máy vật lý), \textbf{pipeline hằng ngày tự động} với cơ chế \textbf{phát hiện trôi mô hình (drift) $\rightarrow$ huấn luyện lại có điều kiện $\rightarrow$ chỉ thăng cấp nếu tốt hơn}. Toàn hệ thống được đóng gói bằng Docker Compose và có thể triển khai trên nhiều nút.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{Phát biểu bài toán \& Mô tả dữ liệu}
+% =====================================================================
+
+\subsection{Phát biểu bài toán dữ liệu lớn}
+Thị trường bất động sản có lượng tin rao khổng lồ, cập nhật liên tục, giá cả nhiễu và phụ thuộc nhiều yếu tố (vị trí, diện tích, pháp lý, bối cảnh vĩ mô). Nhà đầu tư khó xác định đâu là tin \textit{định giá thấp} (giá rao thấp hơn giá trị thực). Bài toán đặt ra:
+\begin{quote}
+\itshape Từ dòng tin rao thu thập hằng ngày, ước lượng \textbf{giá hợp lý} (triệu VND/m\textsuperscript{2}) cho từng tin và tự động chỉ ra những tin có giá rao rẻ hơn giá dự đoán một ngưỡng nhất định.
+\end{quote}
+
+Đây là bài toán mang đủ ba đặc trưng của dữ liệu lớn (\textbf{3V}):
+\begin{itemize}[nosep]
+  \item \textbf{Volume:} tích lũy tin theo ngày trong một \textit{data lake} phân vùng, tăng liên tục.
+  \item \textbf{Velocity:} tin được nạp theo luồng qua Kafka; pipeline chạy tự động hằng ngày.
+  \item \textbf{Variety:} dữ liệu bán cấu trúc (JSON từ API), số, văn bản (tiêu đề/mô tả), toạ độ, và chuỗi thời gian vĩ mô.
+\end{itemize}
+Về mặt học máy, đây là bài toán \textbf{hồi quy} với nhãn \texttt{price\_per\_m2}, đánh giá bằng RMSE/MAE/R\textsuperscript{2}.
+
+\subsection{Mô tả dữ liệu}
+\textbf{Nguồn chính:} API công khai của Chợ Tốt (\texttt{gateway.chotot.com}), lọc theo vùng TP.HCM (\texttt{region\_v2=13000}) và 4 nhóm BĐS (nhà đất, căn hộ, nhà ở, đất). Mỗi tin (\texttt{PropertyItem}) gồm \textasciitilde22 trường: giá, diện tích, phòng ngủ, số tầng, hướng, quận/huyện/phường, loại BĐS, nội thất, toạ độ, ngày đăng, URL\ldots
+
+\textbf{Nguồn vĩ mô:} thư viện \texttt{vnstock} cung cấp chuỗi vàng/USDVND/VNINDEX; CPI và lãi suất theo tháng lưu trong bảng \texttt{macro\_monthly} (Postgres, nhập tay/UPSERT qua dashboard).
+
+\textbf{Các bảng/tầng dữ liệu chính} (Parquet, phân vùng theo ngày \texttt{dt}):
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l X@{}}
+\toprule
+\textbf{Tầng} & \textbf{Nội dung} \\
+\midrule
+\texttt{listings\_raw}      & Tin thô từ Kafka, mọi cột giữ dạng chuỗi (chưa parse). \\
+\texttt{listings\_pool}     & Đã parse kiểu, lọc scope (HCM/bán/diện tích$>$0), có \texttt{price\_per\_m2}, \textbf{giữ null}. \\
+\texttt{listings\_clean}    & Đã điền khuyết (impute đóng băng) — đầu vào huấn luyện. \\
+\texttt{listings\_features} & Đã as-of join vĩ mô + cột phái sinh. \\
+\texttt{macro\_raw}         & Chuỗi thị trường vĩ mô lấy từ vnstock. \\
+\texttt{predictions}        & Bảng kết quả dự đoán + cờ định giá thấp. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent\textbf{Đơn vị:} mọi trường \texttt{*\_ppm2} tính bằng \textit{triệu VND/m\textsuperscript{2}}; \texttt{predicted\_total\_vnd} tính bằng VND.
+
+% =====================================================================
+\section{Thông tin chung về các công cụ Big Data}
+% =====================================================================
+
+\subsection{Apache Spark --- lõi tính toán phân tán}
+Spark là engine xử lý dữ liệu lớn \textbf{trong bộ nhớ}, tính toán phân tán trên cụm theo mô hình DAG. Trong đề tài, Spark là \textbf{trung tâm duy nhất} thực thi mọi tác vụ nặng: ETL (Spark SQL), đọc luồng (Structured Streaming), và học máy (MLlib). Chạy ở chế độ \textit{Standalone cluster} gồm 1 master + N worker.
+
+\subsection{Apache Kafka --- hàng đợi phân tách nguồn và xử lý}
+Kafka là nền tảng streaming phân tán theo mô hình publish/subscribe, lưu log bền, throughput cao. Ở đây Kafka (chế độ KRaft, 1 broker) dùng topic \texttt{real\_estate\_raw} để \textbf{tách} khâu crawl khỏi khâu xử lý: spider chỉ cần đẩy tin vào Kafka, Spark đọc độc lập.
+
+\subsection{Scrapy --- framework thu thập dữ liệu}
+Scrapy là framework crawl bất đồng bộ. Spider \texttt{chotot} gọi API JSON, phân trang bằng \texttt{offset} (đã xác minh Chợ Tốt bỏ qua tham số \texttt{page}), parse về \texttt{PropertyItem} và đẩy qua \texttt{KafkaPipeline}.
+
+\subsection{PostgreSQL --- lớp phục vụ (serving)}
+CSDL quan hệ, dùng làm nơi phục vụ kết quả cho dashboard: bảng \texttt{predictions}, \texttt{macro\_monthly}, \texttt{users}. Spark đọc/ghi Postgres qua \textbf{JDBC}.
+
+\subsection{Parquet + MinIO/S3A --- data lake}
+\textbf{Parquet} là định dạng cột nén, tối ưu cho phân tích. \textbf{MinIO} là object store tương thích S3; Spark truy cập qua giao thức \texttt{s3a://} để mọi worker (trên các máy khác nhau) cùng đọc/ghi một lake dùng chung.
+
+\subsection{Docker Compose \& Streamlit}
+Docker Compose điều phối toàn cụm; mọi service ML dùng chung một image. Streamlit dựng dashboard web đa trang (báo cáo, nhập CPI, giám sát cụm) chỉ bằng Python.
+
+% =====================================================================
+\section{Ưu/khuyết điểm \& điểm nổi bật so với sản phẩm cùng loại}
+% =====================================================================
+
+\begin{center}
+\begin{longtable}{@{}p{2.6cm} p{5.3cm} p{5.6cm}@{}}
+\toprule
+\textbf{Công cụ} & \textbf{Ưu điểm / điểm nổi bật} & \textbf{Khuyết điểm} \\
+\midrule
+\endhead
+\textbf{Spark} & Tính trong RAM nên nhanh hơn Hadoop MapReduce hàng chục lần; một API thống nhất cho SQL + ML + Streaming (khác Flink thiên real-time, Hadoop MR thiên batch); có MLlib sẵn. & Tốn RAM; overhead khởi động JVM; điều chỉnh tham số phức tạp. \\
+\textbf{Kafka} & Log bền, throughput rất cao, cho phép replay; tách rời nhà sản xuất/tiêu thụ. Nổi bật hơn RabbitMQ ở khả năng lưu trữ và tái xử lý. & Vận hành phức tạp hơn hàng đợi truyền thống; 1 broker chưa có HA. \\
+\textbf{Parquet} & Định dạng cột, nén tốt, đọc chọn cột nhanh; hơn hẳn CSV/JSON cho phân tích. & Không thân thiện để đọc bằng mắt/sửa tay. \\
+\textbf{MinIO/S3A} & Tách lưu trữ khỏi tính toán, nhiều worker cùng truy cập; thay được S3 thật. & Thêm một tầng mạng; cần cấu hình endpoint/credential. \\
+\textbf{PostgreSQL} & ACID, truy vấn mạnh, dễ tích hợp dashboard. & Không phải kho phân tích cột chuyên dụng cho quy mô rất lớn. \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\noindent\textbf{Vì sao chọn Spark làm lõi:} bài toán cần \textbf{đồng thời} ETL, học máy và đọc luồng trên cùng khối dữ liệu — Spark là công cụ duy nhất gộp cả ba trong một engine, tránh phải ghép nhiều hệ.
+
+% =====================================================================
+\section{Case study thực tế}
+% =====================================================================
+\begin{itemize}[nosep]
+  \item \textbf{Apache Spark:} Netflix, Uber, Alibaba dùng Spark cho pipeline ETL/ML quy mô petabyte; Databricks (công ty sáng lập Spark) thương mại hoá nền tảng lakehouse.
+  \item \textbf{Apache Kafka:} LinkedIn (nơi khai sinh Kafka), Uber, Airbnb dùng Kafka làm xương sống dữ liệu thời gian thực.
+  \item \textbf{Định giá BĐS bằng ML:} Zillow (Zestimate, Mỹ) và các nền tảng như Redfin ước lượng giá nhà tự động — cùng lớp bài toán với đề tài này ở quy mô lớn hơn.
+\end{itemize}
+
+% =====================================================================
+\section{Mô hình hệ thống}
+% =====================================================================
+
+\subsection{Kiến trúc tổng thể}
+Dữ liệu chảy một chiều qua các tầng, cụm Spark là bộ máy thực thi cho mọi bước:
+
+\begin{center}
+\begin{tikzpicture}[
+  node distance=0.7cm and 1.1cm,
+  box/.style={draw, rounded corners, align=center, minimum height=0.9cm, font=\small, fill=blue!5},
+  store/.style={draw, align=center, minimum height=0.9cm, font=\small, fill=orange!10},
+  arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box] (spider) {Scrapy\\spider};
+\node[box, below=of spider] (replay) {replay\_producer\\(CSV seed)};
+\node[box, right=of spider] (kafka) {Kafka\\\texttt{real\_estate\_raw}};
+\node[store, right=of kafka] (raw) {listings\_raw};
+\node[store, below=of raw] (pool) {listings\_pool};
+\node[store, below=of pool] (feat) {listings\_features};
+\node[store, right=of raw] (model) {MODEL\_STORE\\(PipelineModel)};
+\node[store, right=of feat] (pred) {predictions};
+\node[store, right=of pred] (pg) {PostgreSQL};
+\node[box, above=of pg] (web) {Dashboard\\Streamlit};
+
+\draw[arr] (spider) -- (kafka);
+\draw[arr] (replay) -| (kafka);
+\draw[arr] (kafka) -- (raw);
+\draw[arr] (raw) -- (pool);
+\draw[arr] (pool) -- (feat);
+\draw[arr] (feat) -- (model);
+\draw[arr] (feat) -- (pred);
+\draw[arr] (pred) -- (pg);
+\draw[arr] (pg) -- (web);
+
+\begin{scope}[on background layer]
+\node[draw, dashed, fit=(raw)(pool)(feat)(pred)(model), inner sep=6pt, label=above:{\footnotesize Data Lake (Parquet / S3A-MinIO)}] {};
+\end{scope}
+\end{tikzpicture}
+\end{center}
+
+\subsection{Phân tầng lưu trữ (design pattern)}
+Điểm thiết kế cốt lõi: tách kho theo \textit{ai truy cập}, cấu hình tập trung tại \texttt{ml/config.py}:
+\begin{itemize}[nosep]
+  \item \texttt{LAKE} --- Parquet, \textbf{executor} Spark đọc/ghi $\rightarrow$ prod: \texttt{s3a://.../lake}.
+  \item \texttt{MODEL\_STORE} --- PipelineModel đã fit $\rightarrow$ prod: \texttt{s3a://.../models}.
+  \item \texttt{META\_DIR} --- các JSON điều khiển nhỏ (\texttt{current.json}, \texttt{metrics.json}, \texttt{impute\_stats.json}, \texttt{retrain\_needed.json}), do \textbf{driver} đọc bằng \texttt{open()} nên \textbf{bắt buộc local, không s3a}.
+\end{itemize}
+
+\subsection{Hai luồng xử lý}
+\begin{itemize}[nosep]
+  \item \textbf{Luồng B (Serve) --- chạy mỗi ngày, không train lại:} \texttt{clean\_parse} $\rightarrow$ \texttt{impute serve} $\rightarrow$ \texttt{score\_new} $\rightarrow$ \texttt{load\_predictions}.
+  \item \textbf{Luồng A (Retrain) --- chỉ khi phát hiện drift:} \texttt{impute\_fit} $\rightarrow$ \texttt{impute\_apply fit} $\rightarrow$ \texttt{feature\_pipeline} $\rightarrow$ \texttt{train} $\rightarrow$ \texttt{promote}.
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[
+  node distance=0.55cm,
+  step/.style={draw, rounded corners, align=center, font=\footnotesize, minimum width=3.4cm, minimum height=0.75cm, fill=blue!5},
+  dec/.style={draw, diamond, aspect=2, align=center, font=\footnotesize, fill=yellow!15},
+  arr/.style={-{Latex[length=2mm]}, thick}
+]
+\node[step] (m0) {0. fetch\_macro};
+\node[step, below=of m0] (m1) {1. replay/crawl $\rightarrow$ Kafka};
+\node[step, below=of m1] (m2) {2. kafka\_to\_parquet $\rightarrow$ raw};
+\node[step, below=of m2] (m3) {3. clean\_parse $\rightarrow$ pool};
+\node[step, below=of m3] (m4) {4. impute serve $\rightarrow$ scored\_input};
+\node[step, below=of m4] (m5) {5. score\_new $\rightarrow$ predictions + cờ drift};
+\node[dec, below=of m5] (d) {drift?};
+\node[step, below=of d, fill=red!8] (rt) {retrain.sh (Luồng A)};
+\node[step, below=of rt] (load) {7. load\_predictions $\rightarrow$ Postgres};
+
+\draw[arr] (m0)--(m1); \draw[arr] (m1)--(m2); \draw[arr] (m2)--(m3);
+\draw[arr] (m3)--(m4); \draw[arr] (m4)--(m5); \draw[arr] (m5)--(d);
+\draw[arr] (d)-- node[right,font=\footnotesize]{Có} (rt);
+\draw[arr] (rt)--(load);
+\draw[arr] (d.east) -- ++(3.2,0) node[above,font=\footnotesize]{Không} |- (load.east);
+\end{tikzpicture}
+\end{center}
+
+% =====================================================================
+\section{Cài đặt, kết nối Spark \& điều chỉnh tham số}
+% =====================================================================
+
+\subsection{Cài đặt bằng Docker Compose}
+Toàn cụm khởi động bằng một lệnh; các service: \texttt{minio} + \texttt{minio-init}, \texttt{kafka}, \texttt{postgres} (tự chạy \texttt{sql/init.sql}), \texttt{spark-master}, \texttt{spark-worker} (nhân bản được).
+
+\begin{lstlisting}[language=bash, caption={Khởi động cụm và mở rộng worker}]
+docker compose up -d --scale spark-worker=3   # 1 master + 3 worker
+# Job hằng ngày (ephemeral) — gọi qua cron:
+docker compose run --rm ml-app bash run_daily.sh
+\end{lstlisting}
+
+\subsection{Kết nối Spark --- nguồn cấu hình duy nhất}
+Mọi job tạo \texttt{SparkSession} qua \texttt{build\_spark()} trong \texttt{ml/config.py}; tất cả path/master/Postgres đọc từ biến môi trường (default = chạy local).
+
+\begin{lstlisting}[language=Python, caption={Kết nối Spark + tự bật S3A khi dùng MinIO (rút gọn từ ml/config.py)}]
+def build_spark(app_name, packages=""):
+    b = (SparkSession.builder
+         .appName(app_name)
+         .master(SPARK_MASTER)                       # local[*] (dev) | spark://master:7077 (prod)
+         .config("spark.sql.shuffle.partitions", SHUFFLE_PARTS))
+    if packages:                                     # jar JDBC khi cần
+        b = b.config("spark.jars.packages", packages)
+    if _is_s3(LAKE, MODEL_STORE, RAW_CSV):           # tự cấu hình MinIO/S3
+        b = _s3_conf(b)
+    return b.getOrCreate()
+\end{lstlisting}
+
+\subsection{Điều chỉnh tham số (tuning)}
+\textbf{(a) Tham số hạ tầng} --- điều khiển qua biến môi trường:
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}l l X@{}}
+\toprule
+\textbf{Tham số} & \textbf{Mặc định} & \textbf{Tác dụng} \\
+\midrule
+\texttt{SPARK\_MASTER} & \texttt{local[*]} & Trỏ tới master của cụm phân tán. \\
+\texttt{spark.sql.shuffle.partitions} & 8 & Số phân vùng khi shuffle --- cân bằng song song vs overhead. \\
+\texttt{SPARK\_WORKER\_CORES / MEMORY} & 2 / 2g & Tài nguyên mỗi worker. \\
+\texttt{fs.s3a.fast.upload.buffer} & bytebuffer & Đệm upload bằng RAM off-heap, tránh lỗi \texttt{buffer.dir} trên worker container. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{(b) Tham số mô hình} --- \texttt{CrossValidator} 3-fold + \texttt{ParamGridBuilder} dò lưới cho 3 regressor:
+\begin{lstlisting}[language=Python, caption={Lưới siêu tham số (rút gọn từ ml/train.py)}]
+# RandomForest: numTrees in {50,100} x maxDepth in {5,10}
+# GBT:          maxDepth in {3,5}   x maxIter  in {30,50}
+# LinearRegr.:  regParam in {0,0.1} x elasticNet in {0,0.5}
+cv = CrossValidator(estimator=pipe, estimatorParamMaps=grid,
+                    evaluator=ev_rmse, numFolds=3, seed=42, parallelism=2)
+\end{lstlisting}
+Ngoài ra có \textbf{ablation vĩ mô} (huấn luyện có/không cột macro để đo đóng góp) và \textbf{macro gate} (chỉ bật đặc trưng vĩ mô khi dữ liệu đủ phủ: $\geq$6 tháng span \textbf{và} $\geq$3 tháng phân biệt).
+
+% =====================================================================
+\section{Minh họa xử lý dữ liệu lớn (Demo)}
+% =====================================================================
+
+\subsection{Chứng minh chạy phân tán thật}
+Trang \textit{Cluster Status} của dashboard đọc JSON từ \texttt{<master>/json/} và đếm số \textbf{host vật lý riêng biệt} (\texttt{distinct\_hosts}). Khi $\geq$2 host khác nhau cùng ALIVE $\Rightarrow$ hệ thống chạy trên \textit{nhiều máy thật}, không phải nhiều tiến trình trên một máy. Đây là bằng chứng "phân tán" cho phần demo.
+
+\subsection{Kết quả học máy}
+\texttt{train.py} so sánh 3 model $\times$ (macro / no\_macro), chọn model tốt nhất theo RMSE test và lưu kèm \texttt{metrics.json}. Kết quả thực nghiệm: \textbf{RandomForest} cho kết quả tốt nhất (ví dụ RMSE $\approx$ 25.7, R\textsuperscript{2} $\approx$ 0.74 trên một lần chạy). Model được lưu dạng \textbf{PipelineModel đầy đủ} (gồm feature stages) $\rightarrow$ khâu chấm điểm nạp đúng một artifact, loại trừ lệch train/serve.
+
+\subsection{Phát hiện định giá thấp \& drift}
+\texttt{score\_new.py} tính:
+\[
+\texttt{undervalued\_ratio} = \frac{\texttt{predicted\_ppm2} - \texttt{listing\_ppm2}}{\texttt{predicted\_ppm2}}, \quad
+\texttt{is\_undervalued} = (\texttt{ratio} \geq 0.20)
+\]
+Drift check dùng RMSE trên \textbf{tập test-holdout} (\texttt{randomSplit} seed=42 y hệt lúc train, tránh số lạc quan); báo drift khi $\text{RMSE} > 1.5 \times \text{baseline}$ và \textbf{ghi cờ} \texttt{retrain\_needed.json}. Việc có retrain hay không do orchestrator (\texttt{run\_daily.sh}) quyết định --- \textit{tách tín hiệu khỏi hành động}.
+
+\subsection{Trực quan hoá trên Dashboard}
+Dashboard Streamlit (có đăng nhập bcrypt) hiển thị: thẻ chỉ số (số tin đã chấm, \% định giá thấp, giá TB), bảng chi tiết có link tin, và 3 biểu đồ: (1) giá thực vs dự đoán theo quận, (2) số tin định giá thấp theo quận, (3) phân bố mức chênh lệch giá.
+
+% =====================================================================
+\section{Kết luận}
+% =====================================================================
+Đề tài xây dựng một hệ thống dữ liệu lớn \textbf{đầu-cuối} và \textbf{phân tán thật}, minh hoạ đủ các kỹ thuật trọng tâm: thu thập, streaming (Kafka + Spark Structured Streaming), xử lý dữ liệu lớn (Spark SQL trên data lake Parquet/S3A) và học máy (Spark MLlib với tuning, cross-validation, ablation). Các quyết định kỹ thuật hướng tới \textbf{độ tin cậy production}: cấu hình tập trung, đối xứng train/serve, drift-triggered retrain, promote-if-better, và các bước non-fatal để hệ thống bền với sự cố thành phần. Hướng phát triển: bật crawl thật hằng ngày ở quy mô lớn hơn, bổ sung đặc trưng không gian (toạ độ/khoảng cách trung tâm), và nâng Kafka/Spark lên cấu hình nhiều bản sao (HA).
+
+\end{document}
